@@ -1,0 +1,8 @@
+numpy
+pandas
+rasterio
+scipy
+scikit-learn
+matplotlib
+python-dotenv
+sqlalchemy

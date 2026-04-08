@@ -1,0 +1,35 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment variables and secrets
+.env
+*.env
+
+# Logs and databases
+*.log
+*.db
+
+# Local scripts and data
+data/eval
+*.ipynb
+
+# Backups and temporary files
+*.bak
+*.tmp
+*.zip
+*GH001*
+
+# Data files (if not needed for version control)
+data/
+results/
+config.json
+*.tif*
+*.csv
