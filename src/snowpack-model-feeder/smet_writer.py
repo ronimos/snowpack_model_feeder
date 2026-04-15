@@ -14,7 +14,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
 
 # --- Unit conversion functions ---
@@ -289,6 +289,304 @@ def write_grid_smet(df_base: pd.DataFrame,
         
         output_path = out_dir / f"{cell_id}.smet"
         write_smet(cell_df, str(output_path), cell_config)
+
+
+# =====================================================================
+# SMET reader and NWP refill augmentation
+# =====================================================================
+
+def read_smet(path: str) -> Tuple[dict, pd.DataFrame]:
+    """
+    Parse a SMET 1.1 ASCII file into a header dict and timestamped DataFrame.
+
+    Values are returned as stored in the file — not converted to SI units.
+    nodata sentinels are replaced with NaN.
+
+    Returns
+    -------
+    header : dict of all header key=value pairs plus synthesised keys:
+        'fields_list'          : list of field names (timestamp excluded)
+        'units_offset_list'    : list of float offsets  (timestamp excluded)
+        'units_multiplier_list': list of float multipliers (timestamp excluded)
+        '_header_order'        : field keys in original file order
+    df : DataFrame indexed by timestamp, one column per field
+    """
+    header: dict = {}
+    header_order: list = []
+    data_rows: list = []
+    in_header = False
+    in_data = False
+
+    with open(path) as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped == '[HEADER]':
+                in_header, in_data = True, False
+                continue
+            if stripped == '[DATA]':
+                in_header, in_data = False, True
+                continue
+            if in_header and '=' in stripped:
+                key, _, val = stripped.partition('=')
+                key = key.strip()
+                header[key] = val.strip()
+                header_order.append(key)
+            elif in_data:
+                data_rows.append(stripped.split())
+
+    header['_header_order'] = header_order
+
+    all_fields = header.get('fields', '').split()
+    ts_skip = 1 if all_fields and all_fields[0] == 'timestamp' else 0
+    data_fields = all_fields[ts_skip:]
+    n = len(data_fields)
+
+    def _parse_units(key: str, default: float) -> list:
+        raw = [float(x) for x in header.get(key, '').split()]
+        # SMET files include a leading placeholder for the timestamp column
+        if len(raw) == n + 1:
+            raw = raw[1:]
+        elif len(raw) > n + 1:
+            raw = raw[1:n + 1]
+        while len(raw) < n:
+            raw.append(default)
+        return raw[:n]
+
+    header['fields_list'] = data_fields
+    header['units_offset_list'] = _parse_units('units_offset', 0.0)
+    header['units_multiplier_list'] = _parse_units('units_multiplier', 1.0)
+
+    nodata = float(header.get('nodata', -999))
+    timestamps: list = []
+    rows: list = []
+
+    for parts in data_rows:
+        if not parts:
+            continue
+        try:
+            ts = pd.Timestamp(parts[0])
+        except Exception:
+            continue
+        vals = []
+        for v in parts[1:n + 1]:
+            try:
+                fv = float(v)
+                vals.append(np.nan if fv == nodata else fv)
+            except ValueError:
+                vals.append(np.nan)
+        while len(vals) < n:
+            vals.append(np.nan)
+        timestamps.append(ts)
+        rows.append(vals)
+
+    df = pd.DataFrame(rows, columns=data_fields,
+                      index=pd.DatetimeIndex(timestamps, name='timestamp'))
+    return header, df
+
+
+def augment_smet_with_refill(smet_path: str,
+                              refill_header: dict,
+                              refill_df: pd.DataFrame,
+                              output_path: Optional[str] = None,
+                              fields: Optional[list] = None) -> list:
+    """
+    Augment a station-derived SMET with missing fields from an NWP refill SMET.
+
+    Reads the station SMET, identifies which refill fields are absent, resamples
+    the NWP data (typically 6-hourly) to station timestamps via linear time
+    interpolation, and rewrites the SMET with the merged fields and updated header.
+
+    Parameters
+    ----------
+    smet_path     : path to the station SMET to augment
+    refill_header : header dict from read_smet() on the NWP refill file
+    refill_df     : DataFrame from read_smet() on the NWP refill file
+    output_path   : destination path (default: overwrite smet_path in place)
+    fields        : explicit list of refill fields to add; default adds all
+                    fields present in refill but absent from the station SMET
+
+    Returns
+    -------
+    list of field names that were added (empty if nothing new to add)
+    """
+    output_path = output_path or smet_path
+
+    station_header, station_df = read_smet(smet_path)
+
+    station_field_set = set(station_header['fields_list'])
+    candidates = fields if fields is not None else refill_header['fields_list']
+    # HS_meas and HS_mod are excluded — the pipeline's HS field is authoritative.
+    # Including HS_meas (always -999 from NWP) causes SNOWPACK to fail when
+    # ENFORCE_MEASURED_SNOW_HEIGHTS is TRUE.
+    REFILL_EXCLUDE = {'HS_meas', 'HS_mod'}
+
+    add_fields = [f for f in candidates
+                  if f in refill_df.columns
+                  and f not in station_field_set
+                  and f not in REFILL_EXCLUDE]
+
+    if not add_fields:
+        return []
+
+    # --- Resample refill (typically 6-hourly) to station timestamps (hourly) ---
+    # Build a combined index so that interpolate(method='time') works correctly
+    # across both grids, then select only station timestamps.
+    # Values outside the refill time range remain NaN and are written as nodata.
+    refill_sub = refill_df[add_fields]
+    combined_idx = station_df.index.union(refill_sub.index).sort_values()
+    refill_up = (refill_sub
+                 .reindex(combined_idx)
+                 .interpolate(method='time')
+                 .reindex(station_df.index))
+
+    # --- Build merged units metadata ---
+    rf_fields = refill_header['fields_list']
+    rf_offsets = refill_header['units_offset_list']
+    rf_mults = refill_header['units_multiplier_list']
+
+    add_offsets = [rf_offsets[rf_fields.index(f)] for f in add_fields]
+    add_mults = [rf_mults[rf_fields.index(f)] for f in add_fields]
+
+    merged_fields = station_header['fields_list'] + add_fields
+    merged_offsets = station_header['units_offset_list'] + add_offsets
+    merged_mults = station_header['units_multiplier_list'] + add_mults
+
+    nodata = float(station_header.get('nodata', -999))
+
+    # Convert to numpy arrays for fast row-by-row write
+    station_arr = station_df[station_header['fields_list']].to_numpy()
+    refill_arr = refill_up[add_fields].to_numpy()
+
+    def _fmt(v: float) -> str:
+        return f"{nodata:.3f}" if np.isnan(v) else f"{v:.3f}"
+
+    with open(output_path, 'w') as f:
+        f.write("SMET 1.1 ASCII\n")
+        f.write("[HEADER]\n")
+
+        for key in station_header['_header_order']:
+            if key == 'fields':
+                f.write(f"fields           = timestamp {' '.join(merged_fields)}\n")
+            elif key == 'units_offset':
+                vals_str = ' '.join(f"{v:g}" for v in merged_offsets)
+                f.write(f"units_offset     = 0 {vals_str}\n")
+            elif key == 'units_multiplier':
+                vals_str = ' '.join(f"{v:g}" for v in merged_mults)
+                f.write(f"units_multiplier = 1 {vals_str}\n")
+            else:
+                f.write(f"{key:<16} = {station_header[key]}\n")
+
+        f.write("[DATA]\n")
+
+        for i, ts in enumerate(station_df.index):
+            ts_str = ts.strftime("%Y-%m-%dT%H:%M:%S")
+            vals = [_fmt(v) for v in station_arr[i]]
+            vals += [_fmt(v) for v in refill_arr[i]]
+            f.write(f"{ts_str}  {'  '.join(vals)}\n")
+
+    return add_fields
+
+
+def fill_smet_gaps_from_refill(smet_path: str,
+                                refill_header: dict,
+                                refill_df: pd.DataFrame,
+                                max_gap_hours: int = 48,
+                                output_path: str | None = None) -> dict:
+    """
+    Fill gaps in an existing SMET file using NWP refill data.
+
+    Two gap types are handled:
+      - Missing hourly rows: inserted into a complete hourly index
+      - Existing rows where fields are nodata: filled from refill
+
+    HS gaps are filled by linear interpolation between surrounding station
+    values — the refill HS_mod is not used since NWP accumulation differs
+    significantly from spatially-distributed cluster values.
+
+    All other fields present in both the station SMET and refill are filled
+    from the NWP refill, but only across gaps <= max_gap_hours.
+
+    Parameters
+    ----------
+    max_gap_hours : gaps longer than this are left as nodata
+
+    Returns
+    -------
+    dict with 'n_rows_inserted' and 'n_rows_filled'
+    """
+    output_path = output_path or smet_path
+    station_header, station_df = read_smet(smet_path)
+    nodata = float(station_header.get('nodata', -999))
+    station_fields = station_header['fields_list']
+
+    # Reindex to complete hourly sequence — missing rows become all-NaN
+    full_idx = pd.date_range(station_df.index[0], station_df.index[-1], freq='1h')
+    n_rows_inserted = len(full_idx) - len(station_df)
+    station_df = station_df.reindex(full_idx)
+
+    # Fill HS gaps by linear interpolation between surrounding station values.
+    # HS_mod from the refill is intentionally not used — NWP accumulation
+    # differs significantly from spatially-distributed cluster values.
+    if 'HS' in station_fields:
+        station_df['HS'] = station_df['HS'].interpolate(
+            method='time',
+            limit=max_gap_hours,
+            limit_direction='forward')
+
+    # Resample refill to hourly at full station index
+    combined_idx = full_idx.union(refill_df.index).sort_values()
+    refill_up = (refill_df
+                 .reindex(combined_idx)
+                 .interpolate(method='time')
+                 .reindex(full_idx))
+
+    # For all other station fields present in refill, fill NaN rows
+    # but only across gaps <= max_gap_hours
+    n_rows_filled = 0
+    for field in station_fields:
+        if field == 'HS':
+            continue  # handled above
+        if field not in refill_up.columns:
+            continue
+        col = station_df[field]
+        is_gap = col.isna()
+        if not is_gap.any():
+            continue
+
+        gap_blocks = (is_gap != is_gap.shift()).cumsum()[is_gap]
+        for _, block_idx in station_df[is_gap].groupby(gap_blocks).groups.items():
+            if len(block_idx) <= max_gap_hours:
+                station_df.loc[block_idx, field] = refill_up.loc[block_idx, field]
+                n_rows_filled += len(block_idx)
+
+    # Capture array AFTER all fills
+    merged_offsets = station_header['units_offset_list']
+    merged_mults = station_header['units_multiplier_list']
+    station_arr = station_df[station_fields].to_numpy()
+
+    def _fmt(v):
+        return f"{nodata:.3f}" if np.isnan(v) else f"{v:.3f}"
+
+    with open(output_path, 'w') as f:
+        f.write("SMET 1.1 ASCII\n")
+        f.write("[HEADER]\n")
+        for key in station_header['_header_order']:
+            if key == 'fields':
+                f.write(f"fields           = timestamp {' '.join(station_fields)}\n")
+            elif key == 'units_offset':
+                f.write(f"units_offset     = 0 {' '.join(f'{v:g}' for v in merged_offsets)}\n")
+            elif key == 'units_multiplier':
+                f.write(f"units_multiplier = 1 {' '.join(f'{v:g}' for v in merged_mults)}\n")
+            else:
+                f.write(f"{key:<16} = {station_header[key]}\n")
+        f.write("[DATA]\n")
+        for i, ts in enumerate(station_df.index):
+            vals = [_fmt(v) for v in station_arr[i]]
+            f.write(f"{ts.strftime('%Y-%m-%dT%H:%M:%S')}  {'  '.join(vals)}\n")
+
+    return {'n_rows_inserted': n_rows_inserted, 'n_rows_filled': n_rows_filled}
 
 
 # --- Main: convert station CSV to single SMET file ---

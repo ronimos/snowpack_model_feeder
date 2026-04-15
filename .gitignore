@@ -19,6 +19,7 @@ wheels/
 
 # Local scripts and data
 data/eval
+temp/
 *.ipynb
 
 # Backups and temporary files
@@ -30,6 +31,16 @@ data/eval
 # Data files (if not needed for version control)
 data/
 results/
+outputs/
 config.json
 *.tif*
 *.csv
+*.smet
+
+# External models and checkpoints
+models/
+checkpoints/    
+windninja/
+src/snowpack-model-feeder/windninja/
+windninja
+Miniforge3-Linux-x86_64.sh

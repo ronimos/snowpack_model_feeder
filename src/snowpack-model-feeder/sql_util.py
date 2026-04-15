@@ -29,7 +29,7 @@ WEATHER_STATIONS = {
     "A-Basin SA-Base": {
         "id": "CAABM",
         "cols": ["pcpac", "depth", "snow24h"]
-    }
+    },
 }
 
 ROOT_PATH = Path(__file__).parents[2]
@@ -122,7 +122,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Fetch weather data from SQL and save to CSV.")
     parser.add_argument("-t", "--target", default=str(DATA_DIR),
                         help="Directory to save output files")
-    parser.add_argument("-s", "--start-time", help="Start time for data retrieval")
+    parser.add_argument("-s", "--start-time", help="Start time for data retrieval",
+                        default="2025-09-01 00:00:00")
     
     return parser.parse_args()
 
@@ -143,7 +144,10 @@ if __name__ == "__main__":
         
         if not df.empty:
             # Select only requested columns that actually exist in the result
-            existing_cols = [c for c in info["cols"] if c in df.columns]
+            if info["cols"] == ["*"]:
+                existing_cols = df.columns.tolist()  # Use all columns if '*' is specified
+            else:
+                existing_cols = [c for c in info["cols"] if c in df.columns]
             all_stations_data.append(df[existing_cols])
         else:
             logger.warning(f"Skipping {name} due to empty dataset.")

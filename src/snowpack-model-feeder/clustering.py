@@ -16,6 +16,7 @@ Approach:
 """
 
 import numpy as np
+import pandas as pd
 import re
 from pathlib import Path
 from scipy.ndimage import label as connected_components
@@ -52,7 +53,7 @@ def parse_kml_polygon(kml_path: str) -> list:
 
 
 def build_domain_mask(dem: np.ndarray, transform, crs,
-                      kml_path: str = None,
+                      kml_path: str | None = None,
                       min_slope_deg: float = 15.0,
                       resolution: float = 1.0) -> np.ndarray:
     """
@@ -158,53 +159,136 @@ def cluster_cells(hs_matrix: np.ndarray,
                   cell_indices: np.ndarray,
                   grid_shape: tuple,
                   n_clusters: int = 300,
-                  n_pca_components: int = 6,
-                  min_cluster_size: int = 10,
-                  enforce_contiguity: bool = False) -> np.ndarray:
+                  max_cells_per_cluster: int = 1000,
+                  max_cluster_std_m: float = 0.05,  # 5 cm
+                  n_pca_components: float | int = 0.95, # 95% confidance interval, automatically determine number of components
+                  min_cluster_size: int = 4,
+                  enforce_contiguity: bool = True) -> np.ndarray:
     """
-    Cluster cells by HS evolution.
-
+    Cluster cells by HS evolution with recursive splitting of oversized clusters.
+ 
+    1. PCA on full HS matrix
+    2. Initial K-means to get approximate clusters
+    3. Recursively split any cluster that is BOTH:
+       - larger than max_cells_per_cluster AND
+       - has intra-cluster HS std above max_cluster_std_m (if set)
+ 
     Parameters
     ----------
     hs_matrix : (n_cells, n_surveys) array
     cell_indices : (n_cells, 2) array of (row, col)
     grid_shape : (nrows, ncols) of the full grid
-    n_clusters : target number of clusters
-    n_pca_components : number of PCA components for dimensionality reduction
-    min_cluster_size : merge clusters smaller than this into nearest neighbor
-    enforce_contiguity : if True, split disconnected cluster regions (slower)
-
+    n_clusters : initial target number of clusters
+    max_cells_per_cluster : recursively split clusters larger than this
+    max_cluster_std_m : skip splitting if cluster HS std is below this (meters).
+                        If None, split by size only.
+    n_pca_components : number of PCA components or confidance interval (defauls 95%)
+    min_cluster_size : don't split clusters smaller than this
+    enforce_contiguity : if True, split disconnected cluster regions
+ 
     Returns
     -------
     cluster_map : 2D array (nrows, ncols) with cluster IDs (0 = no data)
     """
     n_cells, n_surveys = hs_matrix.shape
-
-    # PCA dimensionality reduction
+ 
+    # PCA dimensionality reduction (once, for all subsequent splitting)
     n_comp = min(n_pca_components, n_surveys, n_cells)
     pca = PCA(n_components=n_comp)
     hs_pca = pca.fit_transform(hs_matrix)
     explained = pca.explained_variance_ratio_.sum()
     print(f"  PCA: {n_comp} components explain {explained:.1%} of variance")
-
-    # K-means clustering
+ 
+    # Initial K-means
     n_k = min(n_clusters, n_cells // max(min_cluster_size, 1))
     kmeans = MiniBatchKMeans(n_clusters=n_k, batch_size=min(10000, n_cells),
                              random_state=42, n_init=3)
     labels = kmeans.fit_predict(hs_pca)
-    print(f"  K-means: {n_k} clusters from {n_cells} cells")
-
-    # Build cluster map on the grid
+    print(f"  Initial K-means: {n_k} clusters from {n_cells} cells")
+ 
+    # --- Recursive splitting of oversized clusters ---
+    next_label = labels.max() + 1
+    max_iterations = 50
+    iteration = 0
+    n_skipped_by_std = 0
+ 
+    while iteration < max_iterations:
+        unique_labels, counts = np.unique(labels, return_counts=True)
+        oversized = unique_labels[counts > max_cells_per_cluster]
+ 
+        if len(oversized) == 0:
+            break
+ 
+        n_split = 0
+        for cid in oversized:
+            mask = labels == cid
+            n_in_cluster = mask.sum()
+ 
+            if n_in_cluster <= max_cells_per_cluster:
+                continue
+            if n_in_cluster < 2 * min_cluster_size:
+                continue
+ 
+            # Variance check: skip if cluster is already tight
+            if max_cluster_std_m is not None:
+                # Mean std across surveys for cells in this cluster
+                cluster_hs = hs_matrix[mask]  # (n_cells_in_cluster, n_surveys)
+                per_survey_std = np.std(cluster_hs, axis=0)  # std across cells, per survey
+                #mean_std = np.mean(per_survey_std)
+                mean_std = np.max(per_survey_std) # Use the maximum variance found across all surveys
+                if mean_std < max_cluster_std_m:
+                    n_skipped_by_std += 1
+                    continue
+ 
+            # Split this cluster into 2 using its PCA features
+            sub_features = hs_pca[mask]
+            sub_km = MiniBatchKMeans(n_clusters=2, random_state=42 + iteration, n_init=3)
+            sub_labels = sub_km.fit_predict(sub_features)
+ 
+            # Check split quality: both halves must be meaningful
+            n_half0 = (sub_labels == 0).sum()
+            n_half1 = (sub_labels == 1).sum()
+            if min(n_half0, n_half1) < min_cluster_size:
+                continue
+ 
+            # Assign: keep one half as original label, other gets new label
+            indices = np.where(mask)[0]
+            for i, idx in enumerate(indices):
+                if sub_labels[i] == 1:
+                    labels[idx] = next_label
+ 
+            next_label += 1
+            n_split += 1
+ 
+        iteration += 1
+        if n_split == 0:
+            break
+ 
+    # Report
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    n_final = len(unique_labels)
+    max_size = counts.max()
+    print(f"  After recursive splitting: {n_final} clusters "
+          f"(max size: {max_size}, target max: {max_cells_per_cluster})")
+    if n_skipped_by_std > 0:
+        print(f"  Skipped {n_skipped_by_std} split(s) — cluster std < "
+              f"{max_cluster_std_m*100:.0f} cm")
+    if max_size > max_cells_per_cluster:
+        n_over = np.sum(counts > max_cells_per_cluster)
+        print(f"  {n_over} cluster(s) still exceed max size "
+              f"(kept because std < threshold or unsplittable)")
+ 
+    # Build cluster map on the grid (re-index labels to 1-based contiguous)
+    label_remap = {old: new + 1 for new, old in enumerate(unique_labels)}
     cluster_map = np.zeros(grid_shape, dtype=np.int32)
     for i, (r, c) in enumerate(cell_indices):
-        cluster_map[r, c] = labels[i] + 1  # 1-indexed, 0 = no data
-
+        cluster_map[r, c] = label_remap[labels[i]]
+ 
     if enforce_contiguity:
         cluster_map = enforce_spatial_contiguity(cluster_map, min_cluster_size)
-
-    n_final = len(np.unique(cluster_map[cluster_map > 0]))
-    print(f"  Final cluster count: {n_final}")
-
+        n_final = len(np.unique(cluster_map[cluster_map > 0]))
+        print(f"  After contiguity enforcement: {n_final} clusters")
+ 
     return cluster_map
 
 
@@ -294,26 +378,43 @@ def compute_cluster_representatives(cluster_map: np.ndarray,
     for cid in cluster_ids:
         mask = cluster_map == cid
         rows, cols = np.where(mask)
-        n_cells = len(rows)
 
-        # Mean HS across cluster cells at each timestep (vectorized)
-        hs_series = np.nanmean(grid_stack[:, rows, cols], axis=1)
+        cell_hs = grid_stack[:, rows, cols]  # (n_times, n_cells)
 
-        # Cluster centroid
-        centroid_r = float(np.mean(rows))
-        centroid_c = float(np.mean(cols))
+        # Drop cells that are NaN for every timestep — they are outside
+        # the valid hourly grid extent and would pollute the cluster mean.
+        valid_cells = ~np.all(np.isnan(cell_hs), axis=0)
+        if not valid_cells.any():
+            # Entire cluster is outside the hourly grid extent — skip it.
+            # This shouldn't happen in a well-formed run but log it.
+            print(f"  WARNING: cluster {cid} has no valid cells in hourly grids, skipping")
+            continue
 
+        cell_hs = cell_hs[:, valid_cells]
+
+        with np.errstate(all='ignore'):
+            hs_series = np.nanmean(cell_hs, axis=1)
+
+        # Interpolate over any remaining all-NaN timesteps (isolated boundary
+        # gaps), then fill any leading/trailing NaN with 0 (bare ground).
+        nan_ts = np.isnan(hs_series)
+        if nan_ts.any():
+            hs_series = (pd.Series(hs_series)
+                         .interpolate(method='linear', limit_direction='both')
+                         .fillna(0.0)
+                         .to_numpy())
+
+        n_cells = int(valid_cells.sum())
         representatives[int(cid)] = {
             'hs_series': hs_series,
             'n_cells': n_cells,
-            'centroid_row': float(centroid_r),
-            'centroid_col': float(centroid_c),
+            'centroid_row': float(np.mean(rows[valid_cells])),
+            'centroid_col': float(np.mean(cols[valid_cells])),
         }
 
     return representatives
 
-
-def auto_select_n_clusters(n_cells: int, target_cells_per_cluster: int = 1000) -> int:
+def auto_select_n_clusters(n_cells: int, target_cells_per_cluster: int = 500) -> int:
     """
     Heuristic: aim for ~target_cells_per_cluster cells per cluster.
     Bounded between 50 and 2000.

@@ -356,7 +356,8 @@ def train_transport_model(X_train: np.ndarray, y_train: np.ndarray,
         n_jobs=-1,
         random_state=42,
     )
-    rf.fit(X_train, y_train)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rf.fit(X_train, y_train)
     return rf
 
 
@@ -412,6 +413,52 @@ def gap_fill_period(hs_start: np.ndarray,
         cumulative = np.where(valid_mask,
                               np.maximum(cumulative + cell_dhs, 0),
                               cumulative + dhs_stn)
+        cumulative = np.maximum(cumulative, 0)
+        grids[ts] = cumulative.copy()
+
+    return grids
+
+
+def gap_fill_station_only(hs_start: np.ndarray,
+                           stn_hs_series: pd.Series,
+                           valid_mask: np.ndarray) -> dict:
+    """
+    Generate hourly HS grids using station HS only — no spatial transport.
+
+    Positive dHS (snowfall): uniform absolute addition across all cells.
+    Negative dHS (settlement/melt): proportional reduction preserving the
+    relative spatial pattern. This avoids driving shallow cells negative
+    while correctly scaling loss to local depth.
+
+    This is the simplest possible baseline. It captures the temporal
+    evolution of total snow volume but not spatial redistribution.
+    """
+    stn_vals = stn_hs_series.values
+    cumulative = hs_start.copy()
+    grids = {}
+
+    for idx, (ts, stn_hs_new) in enumerate(stn_hs_series.items()):
+        if idx == 0:
+            grids[ts] = cumulative.copy()
+            continue
+
+        stn_hs_prev = stn_vals[idx - 1]
+        dhs = stn_hs_new - stn_hs_prev
+
+        if dhs >= 0:
+            # Snowfall: add uniformly
+            cumulative = np.where(valid_mask,
+                                  np.maximum(cumulative + dhs, 0),
+                                  cumulative)
+        else:
+            # Loss: scale proportionally to preserve spatial pattern
+            if stn_hs_prev > 1e-6:
+                ratio = max(stn_hs_new / stn_hs_prev, 0.0)
+                cumulative = np.where(valid_mask,
+                                      cumulative * ratio,
+                                      cumulative)
+            # If station HS is already ~zero, leave grid unchanged
+
         cumulative = np.maximum(cumulative, 0)
         grids[ts] = cumulative.copy()
 
@@ -545,3 +592,259 @@ class WindNinjaTransportModel(TransportModel):
             "WindNinja transport not yet implemented. "
             "See TRANSPORT_MODELS.md for integration plan."
         )
+
+
+# =====================================================================
+# WindNinja wind library
+# =====================================================================
+
+def load_wind_library(library_dir: str) -> dict:
+    """
+    Load WindNinja ASCII wind fields into a nested dict.
+
+    Parameters
+    ----------
+    library_dir : directory containing dir_*_spd_*_vel.asc files
+
+    Returns
+    -------
+    dict: {(direction_deg, speed_mps): {'vel': 2D array, 'ang': 2D array,
+                                         'transform': tuple, 'shape': tuple}}
+    """
+    import re
+    lib = {}
+    lib_path = Path(library_dir)
+
+    vel_files = sorted(lib_path.glob("dir_*_spd_*_vel.asc"))
+    if not vel_files:
+        raise FileNotFoundError(f"No wind library files in {library_dir}")
+
+    for vel_file in vel_files:
+        match = re.match(r'dir_(\d+\.\d+)_spd_(\d+)_vel\.asc', vel_file.name)
+        if not match:
+            continue
+        direction = float(match.group(1))
+        speed     = int(match.group(2))
+
+        ang_file = lib_path / vel_file.name.replace('_vel.asc', '_ang.asc')
+        if not ang_file.exists():
+            warnings.warn(f"Missing ang file for dir={direction} spd={speed}")
+            continue
+
+        vel_arr, transform, shape = _read_asc(str(vel_file))
+        ang_arr, _,         _     = _read_asc(str(ang_file))
+
+        lib[(direction, speed)] = {
+            'vel':       vel_arr,
+            'ang':       ang_arr,
+            'transform': transform,
+            'shape':     shape,
+        }
+
+    print(f"  Loaded {len(lib)} WindNinja library entries from {library_dir}")
+    return lib
+
+
+def _read_asc(path: str) -> tuple:
+    """
+    Read an AAIGRID .asc file into a numpy array.
+
+    Returns (array, (xll, yll, cellsize), (nrows, ncols))
+    """
+    header = {}
+    data_lines = []
+    with open(path) as f:
+        for line in f:
+            parts = line.strip().split()
+            if not parts:
+                continue
+            if parts[0].lower() in ('ncols', 'nrows', 'xllcorner', 'xllcenter',
+                                     'yllcorner', 'yllcenter', 'cellsize',
+                                     'nodata_value'):
+                header[parts[0].lower()] = float(parts[1])
+            else:
+                data_lines.append(parts)
+
+    nodata = header.get('nodata_value', -9999)
+    arr = np.array([[float(v) for v in row] for row in data_lines],
+                   dtype=np.float32)
+    arr[arr == nodata] = np.nan
+
+    xll      = header.get('xllcorner', header.get('xllcenter', 0))
+    yll      = header.get('yllcorner', header.get('yllcenter', 0))
+    cellsize = header.get('cellsize', 1.0)
+
+    return arr, (xll, yll, cellsize), arr.shape
+
+
+def interpolate_wind_field(wind_library: dict,
+                            target_speed: float,
+                            target_direction: float) -> tuple:
+    """
+    Bilinearly interpolate wind library to target speed and direction.
+
+    Interpolation is in wind-speed-squared space (proportional to transport
+    energy) and circular for direction.
+
+    Parameters
+    ----------
+    wind_library    : from load_wind_library()
+    target_speed    : period mean wind speed (m/s)
+    target_direction: period mean wind direction (degrees)
+
+    Returns
+    -------
+    (vel_grid, ang_grid) : 2D arrays interpolated to target conditions
+    """
+    directions = sorted(set(k[0] for k in wind_library))
+    speeds     = sorted(set(k[1] for k in wind_library))
+
+    # Clamp to library range
+    spd = np.clip(target_speed, speeds[0], speeds[-1])
+
+    # Circular direction interpolation: find bounding directions
+    dir_mod = target_direction % 360
+    dir_lo = max((d for d in directions if d <= dir_mod), default=directions[-1])
+    dir_hi = min((d for d in directions if d > dir_mod),  default=directions[0])
+
+    # Handle wrap-around (e.g. between 337.5 and 0)
+    if dir_lo == dir_hi:
+        dir_lo = directions[-1]
+        dir_hi = directions[0]
+        dir_span = (360 - dir_lo) + dir_hi
+        dir_frac = (dir_mod - dir_lo) % 360 / dir_span if dir_span > 0 else 0
+    else:
+        dir_span = dir_hi - dir_lo
+        dir_frac = (dir_mod - dir_lo) / dir_span if dir_span > 0 else 0
+
+    # Speed interpolation: find bounding speeds in speed² space
+    spd_lo = max(s for s in speeds if s <= spd)
+    spd_hi = min(s for s in speeds if s >= spd)
+    if spd_lo == spd_hi:
+        spd_frac = 0.0
+    else:
+        spd_frac = (spd**2 - spd_lo**2) / (spd_hi**2 - spd_lo**2)
+
+    def _get(d, s):
+        key = (d, s)
+        if key not in wind_library:
+            # Fallback to nearest
+            key = min(wind_library.keys(),
+                      key=lambda k: abs(k[0]-d) + abs(k[1]-s))
+        return wind_library[key]
+
+    # Four corners of the interpolation box
+    v_ll = _get(dir_lo, spd_lo)['vel']
+    v_hl = _get(dir_hi, spd_lo)['vel']
+    v_lh = _get(dir_lo, spd_hi)['vel']
+    v_hh = _get(dir_hi, spd_hi)['vel']
+
+    a_ll = _get(dir_lo, spd_lo)['ang']
+    a_hl = _get(dir_hi, spd_lo)['ang']
+    a_lh = _get(dir_lo, spd_hi)['ang']
+    a_hh = _get(dir_hi, spd_hi)['ang']
+
+    # Bilinear interpolation
+    vel = ((1 - dir_frac) * (1 - spd_frac) * v_ll +
+           dir_frac       * (1 - spd_frac) * v_hl +
+           (1 - dir_frac) * spd_frac       * v_lh +
+           dir_frac       * spd_frac       * v_hh)
+
+    # Angular interpolation via unit vectors to handle wrap-around
+    def _ang_interp(a, b, t):
+        ax = np.cos(np.radians(a)); ay = np.sin(np.radians(a))
+        bx = np.cos(np.radians(b)); by = np.sin(np.radians(b))
+        rx = (1-t)*ax + t*bx;  ry = (1-t)*ay + t*by
+        return np.degrees(np.arctan2(ry, rx)) % 360
+
+    ang_lo_spd = _ang_interp(a_ll, a_hl, dir_frac)
+    ang_hi_spd = _ang_interp(a_lh, a_hh, dir_frac)
+    ang        = _ang_interp(ang_lo_spd, ang_hi_spd, spd_frac)
+
+    return vel.astype(np.float32), ang.astype(np.float32)
+
+
+def resample_wind_to_dem(wind_arr: np.ndarray,
+                          wind_transform: tuple,
+                          dem_shape: tuple,
+                          dem_transform) -> np.ndarray:
+    """
+    Resample a WindNinja grid to match the pipeline DEM grid.
+
+    WindNinja outputs are on the same UTM grid as dem_utm.tif but may
+    differ slightly in extent or resolution. Uses bilinear interpolation.
+
+    Parameters
+    ----------
+    wind_arr       : 2D WindNinja array
+    wind_transform : (xll, yll, cellsize) from _read_asc
+    dem_shape      : (nrows, ncols) of target DEM
+    dem_transform  : rasterio Affine transform of target DEM
+
+    Returns
+    -------
+    2D array resampled to dem_shape
+    """
+    from scipy.ndimage import map_coordinates
+
+    xll, yll, cellsize = wind_transform
+    nrows_w, ncols_w   = wind_arr.shape
+    nrows_d, ncols_d   = dem_shape
+
+    # DEM cell centres in projected coordinates
+    dem_cols = np.arange(ncols_d)
+    dem_rows = np.arange(nrows_d)
+    dem_x    = dem_transform[2] + (dem_cols + 0.5) * dem_transform[0]
+    dem_y    = dem_transform[5] + (dem_rows + 0.5) * dem_transform[4]
+
+    # Convert to fractional wind-grid indices
+    # Wind grid: row 0 = top (yll + nrows*cellsize), row increases downward
+    dem_xx, dem_yy = np.meshgrid(dem_x, dem_y)
+    wind_col_idx = (dem_xx - xll) / cellsize - 0.5
+    wind_row_idx = (yll + nrows_w * cellsize - dem_yy) / cellsize - 0.5
+
+    coords    = np.array([wind_row_idx.ravel(), wind_col_idx.ravel()])
+    fill      = np.where(np.isnan(wind_arr), 0, wind_arr)
+    resampled = map_coordinates(fill, coords, order=1,
+                                mode='nearest').reshape(dem_shape)
+
+    return resampled.astype(np.float32)
+
+
+def build_windninja_feature_array(terrain_features: dict,
+                                   wind_vel: np.ndarray,
+                                   wind_ang: np.ndarray,
+                                   valid_mask: np.ndarray) -> tuple:
+    """
+    Build feature matrix using WindNinja fields instead of Sx.
+
+    Features (replacing Sx-based set):
+      Terrain : slope, aspect_sin, aspect_cos, plan_curv, profile_curv, elevation
+      WindNinja: distributed wind speed (m/s), distributed wind direction (sin, cos)
+
+    Returns (X, feature_names).
+    """
+    idx = np.where(valid_mask.ravel())[0]
+    features = []
+    names    = []
+
+    for name in ['slope', 'aspect_sin', 'aspect_cos',
+                 'plan_curvature', 'profile_curvature', 'elevation']:
+        arr = terrain_features[name]
+        features.append(arr.ravel()[idx])
+        names.append(name)
+
+    # WindNinja speed
+    features.append(wind_vel.ravel()[idx])
+    names.append('wn_speed')
+
+    # WindNinja direction as sin/cos to handle circularity
+    ang_rad = np.radians(wind_ang)
+    features.append(np.sin(ang_rad).ravel()[idx])
+    names.append('wn_dir_sin')
+    features.append(np.cos(ang_rad).ravel()[idx])
+    names.append('wn_dir_cos')
+
+    X = np.column_stack(features)
+    X = np.nan_to_num(X, nan=0.0)
+    return X, names

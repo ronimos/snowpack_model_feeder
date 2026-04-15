@@ -11,8 +11,11 @@ dependencies = [
     "pyproj>=3.7.2",
     "python-dotenv>=1.2.2",
     "rasterio>=1.5.0",
+    "requests>=2.33.1",
+    "scikit-image>=0.26.0",
     "scikit-learn>=1.8.0",
     "scipy>=1.17.1",
+    "shapely>=2.1.2",
     "sqlalchemy>=2.0.49",
     "sshtunnel>=0.4.0",
 ]

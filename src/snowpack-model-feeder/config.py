@@ -17,7 +17,9 @@ class ProjectConfig:
     survey_dir: Path = Path("data/surveys")
     weather_csv: Path = Path("data/weather/weather_data.csv")
     boundary_kml: Path = Path("data/boundaries/Little_Proff.kml")
+    start_zone_kml: Path = Path("data/boundaries/Litte_prof_start_zone.kml")
     output_dir: Path = Path("outputs")
+    windninja_library_dir: Path = Path("windninja/library")
 
     # --- Survey file pattern ---
     # Expected format: YYMMDD_*_snowHeight.tif
@@ -52,20 +54,31 @@ class ProjectConfig:
     min_slope_deg: float = 15.0
 
     # --- Clustering ---
-    target_cells_per_cluster: int = 500
-    n_clusters_override: Optional[int] = None  # set to force a specific count
+    target_cells_per_cluster: int = 50  # auto-determines initial cluster count
+    max_cells_per_cluster: int = 20     # recursively split clusters larger than this
+    min_cluster_size: int = 4       # minimum cluster size to avoid excessive splitting
+    n_pca_components: float = 0.99  # Explained variance threshold for PCA dimensionality reduction before clustering
+    n_clusters_override: Optional[int] = None  # set to force a specific initial count
+    max_cluster_std_m: float = 0.08  # 8 cm
 
     def __post_init__(self):
         """Resolve paths relative to project_dir."""
         self.dem_path = self.project_dir / self.dem_path
         self.survey_dir = self.project_dir / self.survey_dir
         self.weather_csv = self.project_dir / self.weather_csv
-        self.boundary_kml = self.project_dir / self.boundary_kml
+        self.boundary_kml  = self.project_dir / self.boundary_kml
+        self.start_zone_kml = self.project_dir / self.start_zone_kml
         self.output_dir = self.project_dir / self.output_dir
+        self.windninja_library_dir = self.project_dir / self.windninja_library_dir
 
     @property
     def analysis_dir(self) -> Path:
         return self.output_dir / "analysis"
+
+    @property
+    def plots_dir(self) -> Path:
+        return self.output_dir / "plots"
+    
 
     @property
     def smet_dir(self) -> Path:
@@ -81,6 +94,7 @@ class ProjectConfig:
 
     def ensure_dirs(self):
         """Create all output directories."""
-        for d in [self.output_dir, self.analysis_dir, self.smet_dir,
+        for d in [self.output_dir, self.analysis_dir, self.plots_dir, self.smet_dir,
                   self.grids_dir, self.resampled_dir]:
             d.mkdir(parents=True, exist_ok=True)
+            
