@@ -15,66 +15,55 @@ for Highway Avalanche Operations" — Ron, Ryan, Valerie, Snook et al.
 
 ## Priority 1 — SNOWPACK -> Release Scenarios -> com1DFA Interface
 
-com1DFA will be implemented later (possibly by a different person), but the
-scenario generation step and output format need to be designed now. The
-distributed SNOWPACK output gives us exactly what's needed to drive both a
-probabilistic scenario framework and a physics-based release area model.
-
 ### P(release) and release size from SNOWPACK
 
-Three complementary approaches, from simple to mechanistic:
+**A. Stability index approach**
 
-**A. Stability index approach (implement first, validate on Jan 18)**
+- `Sk38` (<1.0), `SSI` (<1.5), `Sn38` (<1.0) — point stability indices.
+- Critical cut length `rc`: SNOWPACK variable 0606 (`nElems`). Not yet mapped
+  by xsnow. Add `'0606': 'critical_cut_length'` and flag to Florian.
 
-Individual indices and their limitations:
-- `Sk38` (<1.0): skier triggering on 38deg slope.
-- `SSI` (<1.5): combines Sk38 with weak layer structure.
-- `Sn38` (<1.0): natural stability analog of Sk38.
-- Critical cut length `rc`: SNOWPACK variable 0606 (`nElems`). Short rc +
-  low Sk38 is the strongest combined signal. See critical cut length item below.
-
-Candidate composite criteria:
-1. AND combination: `Sk38 < 1.0 AND Sn38 < 1.5 AND SSI < 1.5`
-2. Weighted score: `score = w1*(1/Sk38) + w2*(1/SSI) + w3*(1/Sn38) + w4*(rc_crit/rc)`
-3. Mechanistic gate: `rc < threshold` then `min(Sk38, Sn38)` for magnitude
-4. Spatial coherence: require minimum contiguous unstable area (>500 m2)
-
-- [ ] **Jan 18 retrospective** — plot index time series in crown-zone clusters
-      Nov 26 through Jan 18. Which combination first crossed threshold?
+- [ ] **Jan 18 retrospective** — time series of Sk38/SSI/Sn38 in crown-zone
+      clusters Nov 26 through Jan 18. Which combination first crossed threshold?
       Was spatial coherence growing before the event?
 
-- [ ] **Critical cut length from SNOWPACK** — variable 0606 / `nElems` (m).
-      Not yet mapped by xsnow. Add `'0606': 'critical_cut_length'` to xsnow
-      variable mapping and flag to Florian. Then add to `visualize_snowpack.py`
-      propagation panel and retrospective analysis.
-
-- [ ] **Release zone vs adjacent slope SNOWPACK comparison** — partition
-      clusters into: (1) release zone, (2) adjacent slope within start zone,
-      (3) reference outside start zone. Compare time series of Sk38, SSI,
-      Sn38, rc, temperature gradient, HS before Jan 18. Expected result:
-      release zone shows lower stability earlier and more persistently.
-      This is direct validation that distributed SNOWPACK captures spatial
-      variability relevant to release — a key paper claim.
-      Implementation: use `cluster_map.npy` + detected release mask to assign
-      cluster IDs to each group, load via xsnow, plot with event date marked.
+- [ ] **Critical cut length from SNOWPACK** — add to xsnow variable mapping,
+      add to `visualize_snowpack.py` propagation panel.
 
 **B. Monte Carlo / MCMC approach**
-- Sample slab density ±20%, weak layer shear strength ±1 sigma, slab thickness
-  from cluster HS distribution. Bounds from SNOWPACK output directly.
+- Sample slab density ±20%, WL shear strength ±1 sigma, slab thickness from
+  cluster HS distribution.
 
-**C. DA-MPM release area estimation (mechanistic, later)**
+**C. DA-MPM / Meloche et al. (2025) — IN PROGRESS**
 - Meloche et al. (2025, JGR Earth Surface, doi:10.1029/2025JF008470)
-- Key input: shear strength gradient theta from distributed SNOWPACK grid
-- DA-MPM code: C++ on Zenodo (Guillet et al. 2023), Python post-processing
-  on GitHub (Meloche 2025). Well-suited for D3+; may overestimate small slabs.
+- [x] **Per-cluster Meloche parameters computed** in `analyze_release_zone.py`:
+      E_slab (van Herwijnen 2016 fit), σ_t, Λ (characteristic elastic length),
+      K_wl (WL stiffness). Power law: E=(ρ/300)^2.5 × 4 MPa, σ_t=(ρ/300)^1.4 × 5 kPa.
+- [x] **θ (WL shear strength gradient) computed** from k=6 nearest neighbor
+      cluster centroids. Units: Pa/m (wl_shear_strength is kPa, converted ×1000).
+- [x] **Dimensionless numbers Π₁, Π₂ and crack arrest length A_ca computed**
+      (Eqs. 19, 20 from paper). Saved to `outputs/analysis/meloche_features_YYYY-MM-DD.csv`.
+- [x] **Meloche comparison plot** — box plots of θ, τ_g, Λ, Π₁, Π₂, A_ca, L_t,
+      slope angle by group (release / adjacent / reference).
+- [x] **Jan 17 results** — release zone shows lower θ (~20 Pa/m vs ~28 Pa/m
+      adjacent), higher τ_g, higher Π₁/Π₂ — predicting longer crack / larger
+      release. Physically consistent with observed D2. θ range matches
+      Meloche et al. (2024) field-measured values (15-30 Pa/m) — validation.
 
-- [ ] **`step_scenarios()` in `pipeline.py`** — standardized output directory:
-      `outputs/scenarios/YYYYMMDD/` containing release_zones.geojson,
-      scenario depth rasters (P10-P90), scenario_weights.json,
-      weak_layer_params.json, mcmc_bounds.json, metadata.json.
+- [ ] **A_ca magnitude validation** — brittle A_ca estimate for release zone
+      ~250m after unit fix. Compare to actual Jan 18 release zone dimensions.
+      If within factor 2, this is a strong paper result.
 
-- [ ] **`identify_release_zones()`** — identify candidate zones from current
-      stability fields alone (no survey pair). Works on any given day.
+- [ ] **Cross-date Meloche analysis** — run at Jan 10, Jan 14, Jan 17 and
+      compare whether Π₁ separation between release/adjacent grows toward
+      event. Would show the instability signal developing spatially.
+
+- [ ] **`step_scenarios()` in `pipeline.py`** — standardized output schema
+      feeding com1DFA: release_zones.geojson, scenario depth rasters (P10-P90),
+      scenario_weights.json, weak_layer_params.json, mcmc_bounds.json.
+
+- [ ] **`identify_release_zones()`** — candidate zones from stability fields
+      alone (no survey pair), usable any day.
 
 - [ ] **Validation against Jan 18** — run scenario generation for Jan 17,
       compare P50 release area and depth against field observations.
@@ -83,143 +72,121 @@ Candidate composite criteria:
 
 ## Priority 2 — Multi-Slope / Off-the-Shelf Architecture
 
-- [x] **`start_zone_kml` added to `ProjectConfig`** —
-      `data/boundaries/Litte_prof_start_zone.kml` used by `detect_boundaries()`
-      to restrict release detection to known release terrain.
+- [x] **`start_zone_kml` and `avalanche_release_area.geojson` in `ProjectConfig`**.
 
-- [ ] **`slopes.yaml` slope registry** — one entry per slope with DEM path,
-      boundary KML, start zone KML, AWS station IDs + roles, highway corridor,
-      milepost range. `ProjectConfig` instantiated from registry entry.
+- [ ] **`slopes.yaml` slope registry** — DEM, boundary KML, start zone KML,
+      AWS station IDs, highway corridor, milepost range per slope.
 
-- [ ] **Remove hardcoded station IDs** — `sql_util.py` (`WEATHER_STATIONS`
-      dict) and `smet_writer.py` (`SUMMIT_STATION`/`BASE_STATION`). Replace
-      with config-driven `StationConfig` from slope registry.
+- [ ] **Remove hardcoded station IDs** from `sql_util.py` and `smet_writer.py`.
 
-- [ ] **Multi-slope runner** — loops over `slopes.yaml`, runs full pipeline
-      per slope, writes to common output schema.
+- [ ] **Multi-slope runner** and standardized GeoJSON output schema.
 
-- [ ] **Standardized output schema** — GeoJSON per slope per day: release
-      zones, stability index summary, scenario weights.
-
-- [ ] **Config validation** — `cfg.validate()` checks paths and SQL
-      connectivity before any step runs.
+- [ ] **Config validation** — `cfg.validate()` checks paths and SQL connectivity.
 
 ---
 
 ## Priority 3 — Daily Survey Operational Mode
 
-- [ ] **Daily mode gap-fill** — `--daily-mode` flag skips RF transport when
-      consecutive surveys are <36h apart, uses direct differencing instead.
+- [ ] **Daily mode gap-fill** — `--daily-mode` flag skips RF when consecutive
+      surveys are <36h apart.
 
-- [ ] **Incremental SNOWPACK updates** — append to SMET, restart from
-      `_res.sno`, append to `.pro` rather than full season rerun.
+- [ ] **Incremental SNOWPACK updates** — append to SMET, restart from `_res.sno`.
 
-- [ ] **Cron-compatible pipeline wrapper** — automate: fetch weather, process
-      new survey, update SMETs, run SNOWPACK forward one day, regenerate maps.
+- [ ] **Cron-compatible pipeline wrapper**.
 
 ---
 
 ## Priority 4 — Transport Model
 
-- [x] **WindNinja installed** — v3.13 via conda-forge, 64 OpenMP threads,
-      running at `/home/ron/miniforge/envs/windninja/bin/WindNinja_cli`.
+- [x] **WindNinja v3.13 installed**, 96-run library at 1m resolution.
+- [x] **Sx replaced with WindNinja** throughout features/train/gap_fill.
+- [x] **Gap-fill default = observed transport** (r=0.83 vs r=0.10 for RF).
 
-- [x] **Wind library generated** — 96 runs (16 directions x 6 speeds:
-      3/8/15/25/40/60 m/s) at 1m resolution. Library at
-      `/home/ron/snowpack_model_feeder/windninja/library/`.
-
-- [x] **Sx replaced with WindNinja** — `spatial_model.py` has
-      `load_wind_library()`, `interpolate_wind_field()`,
-      `resample_wind_to_dem()`, `build_windninja_feature_array()`.
-      `pipeline.py` features/train/gap_fill steps updated.
-
-- [x] **Gap-fill default changed to observed transport** (`--no-model`).
-      LOO-CV: median r=0.83, RMSE=65cm vs RF median r=0.10, RMSE=174cm.
-      Modes: (default) observed transport, `--station-only`, `--use-model` (RF).
-
-- [ ] **WindNinja RF retrain** — run `pipeline.py train`, compare LOO-CV
-      against `cv_results_sx.json`. Document whether WindNinja improves RF.
-
-- [ ] **Clip `max_valid_hs_m` to 5.0m** — currently 12.0m. P99=3.78m,
-      max=10.62m. Change in `config.py` and rerun from `gap_fill`.
-
-- [ ] **Transport model options** — maintain as swappable subclasses:
-      `EmpiricalTransportModel` (RF + WindNinja), stub for physics-based.
+- [ ] **WindNinja RF retrain** — compare LOO-CV against `cv_results_sx.json`.
+- [ ] **Clip `max_valid_hs_m` to 5.0m** (currently 12.0m, P99=3.78m).
 
 ---
 
 ## Priority 5 — Avalanche Detection
 
-- [x] **Image-processing boundary detection implemented** (`avalanche.py`).
-      Pipeline: KML domain mask -> Canny edges on dHS anomaly -> seeded
-      watershed with positive-anomaly background markers -> morphological
-      cleanup -> contours. Start zone KML restricts release candidates.
-      Statistics recomputed within start zone for threshold sensitivity.
-      Tuned defaults: canny_low=0.05, canny_high=0.08, erosion_sigma=1.5.
-      Jan 18 result: release ~1100 m² / -600 m³, deposit ~3945 m² / 3121 m³.
-      Standalone tuning runner: `python avalanche.py --date-before YYYY-MM-DD`
+- [x] **Image-processing boundary detection** (`avalanche.py`). Seeded watershed
+      with start zone KML + Canny edges. Defaults: canny_low=0.05, hi=0.08,
+      erosion_sigma=1.5. Jan 18: release ~1100 m² / -600 m³, deposit ~3945 m².
+- [x] **Multi-period runner** — `--date-before`/`--date-after` args, auto-detects
+      pre-event survey, noise mask support.
+- [x] **Release area GeoJSON** saved at `data/boundaries/avalanche_release_area.geojson`.
 
-- [ ] **Improve release zone completeness** — eastern half of Jan 18 slab
-      (shallower dHS loss, -0.2 to -0.3m) not fully captured. Options:
-      lower erosion_sigma to 1.2, or secondary fill pass with lower threshold.
+- [ ] **Improve eastern half detection** — shallower dHS (-0.2 to -0.3m) not
+      fully captured. Try erosion_sigma=1.2 or secondary fill pass.
 
-- [ ] **Run detection on all survey periods** — validate no false positives
-      in clean periods. Flag periods with detected events for review.
+- [ ] **Run on all survey periods** — validate no false positives in clean periods.
 
-- [ ] **Jan 18 retrospective** — look for SNOWPACK precursor signals:
-      Sk38/SSI evolution, weak layer persistence, TG >10 C/m, crown vs
-      reference cluster comparison. Potentially the strongest paper result.
+- [ ] **Jan 18 retrospective** — SNOWPACK precursor signals in crown clusters.
 
 ---
 
 ## Priority 6 — SNOWPACK Indices & Visualization
 
-- [x] **Three-panel `visualize_snowpack.py`** with HTML flipbook (3 tabs):
-      - Loading: HS, dHS/dt
-      - Stability: min Sk38, min SSI, min Sn38 (buried >30cm)
-      - Propagation: min TG, accumulated TG, stab deformation rate
-      Jan 18 event window highlighted in red banner.
+- [x] **`visualize_snowpack.py`** — four-tab HTML flipbook:
+      - **Loading**: HS, dHS/dt
+      - **Stability**: min Sk38, min SSI, min Sn38 (at WL interface)
+      - **Propagation**: min TG, accumulated TG, stab deformation rate
+      - **Structure**: HS, WL burial depth, slab thickness, WL shear strength,
+        WL grain size, slab density
+      - **Boundary overlays** on all panels: start zone (green), release area (red)
+      - **`--wl-method` flag**: `simple` (bottom 20%, fast) or `grain_type`
+        (FC/DH detection from `split_wl_slab`, proper but slow — run overnight)
+      - Jan 18 event banner, keyboard navigation (arrows, space, 1-4).
 
-- [ ] **Critical cut length panel** — add to propagation tab once xsnow
-      maps variable 0606. Use `min(critical_cut_length)` within search depth.
+- [x] **`analyze_release_zone.py`** — snapshot comparison (Jan 17):
+      - WL/slab boundary via grain_type (FC/DH = 4xx/5xx at base)
+      - Slab: density, hardness, grain size, thickness, dominant grain class
+      - WL: shear strength, grain size, density, burial depth, thickness
+      - Stability: min Sk38/SSI/Sn38/SDR at ±5cm of WL-slab interface
+      - Meloche et al. (2025) parameters: E, σ_t, Λ, θ, Π₁, Π₂, A_ca
+      - RF classifier: release vs adjacent, per-cluster samples, SHAP if available
+      - Cross-date test: train on snapshot, score across season
 
-- [ ] **Weak layer tracking** — identify persistent early-season weak layer
-      (Nov-Dec facets) and track depth, extent, stability as single time series.
+- [ ] **Critical cut length panel** — add once xsnow maps variable 0606.
 
-- [ ] **dHS/dt animation** — fourth panel or separate animation from hourly
-      grids with 24h smoothing.
+- [ ] **Weak layer tracking** — persistent early-season facets as time series.
 
-- [ ] **`grain_type` and `lwc` panels** — map faceted/depth hoar extent and
-      liquid water content (wet slab monitoring).
+- [ ] **`grain_type` and `lwc` panels** — facet extent and wet slab monitoring.
 
 ---
 
 ## Priority 7 — HTML / Project Report
 
-- [x] **Basic HTML flipbook exists** — 3-tab layout, keyboard navigation,
-      Jan 18 event banner, auto-generated at `plots/daily_frames/index.html`.
+- [x] **Four-tab flipbook** with boundary overlays and structure panel.
 
-- [ ] **Upgrade to project report** — add: study site description, methods
-      summary (UAS workflow, spatial model, SNOWPACK, AvaFrame), results
-      section with HS evolution + stability animations + Jan 18 case study,
-      embed flipbook inline.
+- [ ] **Upgrade to project report** — study site, methods, results, Jan 18 case
+      study, embed flipbook inline.
 
 ---
 
 ## Lower Priority / Future
 
-- [ ] **Wet slab integration** — `lwc` from SNOWPACK -> spatial wet slab
-      hazard map using cluster->grid mapping, connecting to `wet_snow_tracker`.
+- [ ] **Classifier generalization — design issue** — DO NOT train on non-event
+      periods as negatives. Jan 18 is skier-triggered: no avalanche ≠ stable.
+      Needs multiple events or independent stability obs (PST, shooting cracks).
+      RF model saved to `outputs/plots/rf_model_YYYY-MM-DD.pkl` for future use.
 
-- [ ] **xsnow contribution** — Zarr caching pattern and cluster->grid
-      reduction are generic. Contribute upstream. Flag `pyproject.toml`
-      version pin issue to Florian.
+- [ ] **Wet slab integration** — `lwc` from SNOWPACK -> wet slab hazard map,
+      connecting to `wet_snow_tracker`.
+
+- [ ] **Zarr cache** — `build_zarr_chunked.py` batched build in progress.
+      Batches layer-pad to 338, squeeze slope/realization singletons, append
+      along location dim. Used by `visualize_snowpack.py` and `analyze_release_zone.py`.
+
+- [ ] **xsnow contribution** — Zarr pattern and cluster->grid reduction are
+      generic. Contribute upstream. Flag pyproject.toml version pin to Florian.
 
 - [ ] **Validation dataset** — other observed avalanches on Little Professor
       this season beyond Jan 18?
 
-- [ ] **PST methodology connection** [LOW PRIORITY] — can SNOWPACK reproduce
-      propagation propensity trend from PST field tests at Berthoud Pass?
+- [ ] **PST methodology connection** [LOW] — can SNOWPACK reproduce propagation
+      propensity trend from Berthoud Pass PST field tests?
 
-- [ ] **Cluster quality feedback loop** — check whether high intra-cluster
-      HS std produces meaningfully different stability outputs.
+- [ ] **Cluster quality feedback loop** — does high intra-cluster HS std produce
+      meaningfully different stability outputs?
+      

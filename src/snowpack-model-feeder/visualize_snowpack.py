@@ -33,6 +33,7 @@ import xarray as xr
 import xsnow
 
 from config import ProjectConfig
+from pyproj import Transformer as _Transformer
 
 # =====================================================================
 # Constants
@@ -70,6 +71,22 @@ PANEL_SETS = {
         ("atg_mean", "Accum TG (°C/m·d)","YlOrRd",   0, 500.0, None,    False),
         ("sdr_min",  "Min Stab Def Rate","RdYlGn",   0,   6.0, 1.0,     True),
     ],
+    "structure": [
+        ("HS",            "HS (cm)",               "Blues",    0,  350, None, False),
+        ("wl_burial",     "WL burial depth (m)",   "YlOrRd",   None, None, None, False),
+        ("slab_thick",    "Slab thickness (m)",    "Blues",    None, None, None, False),
+        ("wl_strength",   "WL shear strength (kPa)","RdYlGn",  None, None, None, True),
+        ("wl_grain",      "WL grain size (mm)",    "YlOrRd",   None, None, None, False),
+        ("slab_density",  "Slab density (kg/m³)",  "Blues",    None, None, None, False),
+    ],
+    "meloche": [
+        ("E_slab",   "Slab E (MPa)",           "Blues",    None, None, None, False),
+        ("Lambda",   "Λ elastic length (m)",   "YlOrRd",   None, None, None, False),
+        ("sigma_t",  "σ_t tensile str (kPa)",  "Blues",    None, None, None, False),
+        ("tau_g",    "τ_g driving stress (Pa)","RdYlGn_r", None, None, None, False),
+        ("wl_burial","WL burial depth (m)",    "YlOrRd",   None, None, None, False),
+        ("slab_density","Slab density (kg/m³)","Blues",    None, None, None, False),
+    ],
 }
 
 
@@ -77,13 +94,79 @@ PANEL_SETS = {
 # Load all clusters — lazy via Dask
 # =====================================================================
 
+# =====================================================================
+# Boundary overlay helpers
+# =====================================================================
+
+def _load_boundary_polys(project_dir: Path, dem_transform):
+    """
+    Load start zone KML and release area GeoJSON, reproject to UTM,
+    return as lists of (xs, ys) tuples in map coordinates.
+    """
+    import json
+    from xml.etree import ElementTree as ET
+    from shapely.geometry import shape
+    from shapely.ops import unary_union
+
+    t = _Transformer.from_crs('EPSG:4326', 'EPSG:32613', always_xy=True)
+
+    def lonlat_to_map(pts_lonlat):
+        return [t.transform(x, y) for x, y in pts_lonlat]
+
+    boundaries = {}
+
+    # Start zone KML
+    kml_path = project_dir / 'data' / 'boundaries' / 'Litte_prof_start_zone.kml'
+    if kml_path.exists():
+        tree = ET.parse(str(kml_path))
+        ns   = '{http://www.opengis.net/kml/2.2}'
+        ct   = (tree.find('.//coordinates') or
+                tree.find(f'.//{ns}coordinates'))
+        if ct is not None:
+            pts = [tuple(map(float, p.split(',')[:2]))
+                   for p in ct.text.strip().split() if ',' in p]
+            utm = lonlat_to_map(pts)
+            boundaries['start_zone'] = ([x for x, y in utm],
+                                         [y for x, y in utm])
+
+    # Release area GeoJSON
+    gj_path = project_dir / 'data' / 'boundaries' / 'avalanche_release_area.geojson'
+    if gj_path.exists():
+        with open(str(gj_path)) as f:
+            gj = json.load(f)
+        polys = [shape(feat['geometry']) for feat in gj['features']]
+        merged = unary_union(polys)
+
+        def reproj(poly):
+            from shapely.geometry import Polygon, MultiPolygon
+            def ring(r): return lonlat_to_map(list(r.coords))
+            if poly.geom_type == 'Polygon':
+                return Polygon(ring(poly.exterior),
+                               [ring(i) for i in poly.interiors])
+            return MultiPolygon([reproj(p) for p in poly.geoms])
+
+        utm_poly = reproj(merged)
+        if utm_poly.geom_type == 'Polygon':
+            xs = list(utm_poly.exterior.xy[0])
+            ys = list(utm_poly.exterior.xy[1])
+            boundaries['release_area'] = (xs, ys)
+        elif utm_poly.geom_type == 'MultiPolygon':
+            segs = []
+            for p in utm_poly.geoms:
+                segs.append((list(p.exterior.xy[0]),
+                              list(p.exterior.xy[1])))
+            boundaries['release_area_multi'] = segs
+
+    return boundaries
+
+
 def load_all_clusters(pro_dir: Path,
                       zarr_path: Path | None = None) -> xr.Dataset:
     if zarr_path and zarr_path.exists():
         print(f"Loading dataset from Zarr: {zarr_path}...")
         dr = xr.open_zarr(str(zarr_path))
         ds = xsnow.xsnowDataset(dr)
-        print(f"  Dataset dims: {dict(ds.dims)}")
+        print(f"  Dataset dims: {dict(ds.sizes)}")
         return ds
     pro_files = list(pro_dir.glob("cluster_*.pro"))
     if not pro_files:
@@ -94,7 +177,7 @@ def load_all_clusters(pro_dir: Path,
         print(f"  Saving to Zarr: {zarr_path}...")
         ds.data.to_zarr(str(zarr_path), mode='w')
         print(f"  Zarr saved.")
-    print(f"  Dataset dims: {dict(ds.dims)}")
+    print(f"  Dataset dims: {dict(ds.sizes)}")
     return ds
 
 
@@ -106,7 +189,8 @@ def reduce_at_time(ds: xr.Dataset,
                    timestamp: pd.Timestamp,
                    prev_hs: dict,
                    min_depth_cm: float,
-                   max_depth_cm: float) -> dict:
+                   max_depth_cm: float,
+                   wl_method: str = 'simple') -> dict:
     """
     Reduce all variables to per-cluster scalars at one timestep.
 
@@ -121,18 +205,18 @@ def reduce_at_time(ds: xr.Dataset,
     def layer_min(var):
         return (ds_t[var].where(in_depth)
                          .min(dim='layer')
-                         .squeeze(['slope','realization'])
+                         .squeeze([d for d in ['slope','realization'] if d in ds_t.dims])
                          .compute().values)
 
     def layer_mean(var):
         return (ds_t[var].where(in_depth)
                          .mean(dim='layer')
-                         .squeeze(['slope','realization'])
+                         .squeeze([d for d in ['slope','realization'] if d in ds_t.dims])
                          .compute().values)
 
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        hs       = ds_t['HS'].squeeze(['slope','realization']).compute().values
+        hs       = ds_t['HS'].squeeze([d for d in ['slope','realization'] if d in ds_t.dims]).compute().values
         sk38_min = layer_min('sk38')
         ssi_min  = layer_min('ssi')
         sn38_min = layer_min('sn38')
@@ -151,15 +235,88 @@ def reduce_at_time(ds: xr.Dataset,
     else:
         dhs_dt = np.zeros_like(hs)
 
+    # --- Structure variables (WL/slab properties) ---
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        sq_dims   = [d for d in ['slope','realization'] if d in ds_t.dims]
+        hs_vals   = ds_t['HS'].squeeze(sq_dims).compute().values
+        z_da      = ds_t['z'].squeeze(sq_dims).compute()   # (location, layer)
+
+        if wl_method == 'simple':
+            # Fast: bottom 20% of HS = WL proxy, top 80% = slab
+            hs_bc     = xr.DataArray(hs_vals, dims=['location'])
+            wl_zone   = (z_da < -0.8 * hs_bc) & ~np.isnan(z_da)
+            slab_zone = (z_da > -0.8 * hs_bc) & (z_da < 0) & ~np.isnan(z_da)
+            wl_burial_raw  = hs_vals * 0.8 / 100.0
+            slab_thick_raw = hs_vals * 0.8 / 100.0
+        else:
+            # Proper: FC/DH grain-type detection per cluster
+            import sys as _sys
+            from pathlib import Path as _Path
+            _sys.path.insert(0, str(_Path(__file__).resolve().parent))
+            from analyze_release_zone import split_wl_slab
+            z_np  = z_da.values          # (location, layer)
+            gt_np = ds_t['grain_type'].squeeze(sq_dims).compute().values
+            n_loc = z_np.shape[0]
+            wl_mask_np   = np.zeros(z_np.shape, dtype=bool)
+            slab_mask_np = np.zeros(z_np.shape, dtype=bool)
+            wl_burial_raw  = np.full(n_loc, np.nan)
+            slab_thick_raw = np.full(n_loc, np.nan)
+            for li in range(n_loc):
+                sm, wm, iz = split_wl_slab(gt_np[li], z_np[li])
+                if sm is not None:
+                    wl_mask_np[li]   = wm
+                    slab_mask_np[li] = sm
+                    wl_burial_raw[li]  = -iz / 100.0      # cm -> m
+                    slab_thick_raw[li] = -iz / 100.0
+            wl_zone   = xr.DataArray(wl_mask_np,   dims=z_da.dims)
+            slab_zone = xr.DataArray(slab_mask_np, dims=z_da.dims)
+
+        wl_str_raw = (ds_t['shear_strength'].squeeze(sq_dims).where(wl_zone)
+                      .mean(dim='layer').compute().values)
+        wl_grain_raw = (ds_t['grain_size'].squeeze(sq_dims).where(wl_zone)
+                        .mean(dim='layer').compute().values)
+        slab_dens_raw = (ds_t['density'].squeeze(sq_dims).where(slab_zone)
+                         .mean(dim='layer').compute().values)
+
+        # Meloche et al. (2025) per-cluster parameters
+        # E and σ_t from slab density (power laws, van Herwijnen 2016)
+        E_slab_raw   = (slab_dens_raw / 300.0)**2.5 * 4.0    # MPa
+        sigma_t_raw  = (slab_dens_raw / 300.0)**1.4 * 5.0    # kPa
+        # Characteristic elastic length Λ = sqrt(E'·h·D_wl / G_wl)
+        G_wl_pa      = 0.2e6                                   # Pa
+        nu           = 0.3
+        E_prime_raw  = E_slab_raw * 1e6 / (1 - nu**2)         # Pa
+        D_wl_m       = np.where(slab_thick_raw > 0,
+                                slab_thick_raw * 0.2, np.nan)  # 20% of slab as WL
+        h_m          = slab_thick_raw
+        Lambda_raw   = np.where(
+            (h_m > 0) & (D_wl_m > 0),
+            np.sqrt(E_prime_raw * h_m * D_wl_m / G_wl_pa), np.nan)
+        # Gravitational driving stress τ_g (Pa)
+        # Use fixed slope ψ=32° (mean release zone slope)
+        psi, phi = np.radians(32), np.radians(27)
+        tau_g_raw = (slab_dens_raw * 9.81 * h_m *
+                     np.sin(psi) * (1 - np.tan(phi)/np.tan(psi)))
+
     return {
-        'HS':       hs,
-        'dhs_dt':   dhs_dt,
-        'sk38_min': sk38_min,
-        'ssi_min':  ssi_min,
-        'sn38_min': sn38_min,
-        'tg_min':   np.abs(tg_min),   # magnitude — SNOWPACK TG can be signed
-        'atg_mean': atg_mean,
-        'sdr_min':  sdr_min,
+        'HS':          hs,
+        'dhs_dt':      dhs_dt,
+        'sk38_min':    sk38_min,
+        'ssi_min':     ssi_min,
+        'sn38_min':    sn38_min,
+        'tg_min':      np.abs(tg_min),
+        'atg_mean':    atg_mean,
+        'sdr_min':     sdr_min,
+        'wl_strength':  wl_str_raw,
+        'wl_grain':     wl_grain_raw,
+        'wl_burial':    wl_burial_raw,
+        'slab_thick':   slab_thick_raw,
+        'slab_density': slab_dens_raw,
+        'E_slab':       E_slab_raw,
+        'sigma_t':      sigma_t_raw,
+        'Lambda':       Lambda_raw,
+        'tau_g':        tau_g_raw,
     }, {'hs': hs, 'time': timestamp}
 
 
@@ -185,11 +342,20 @@ def scalars_to_grid(values, location_names, cluster_map):
 # =====================================================================
 
 def plot_frame(grids, dem, hillshade, bounds, timestamp,
-               panel_set_name, panel_defs, output_path, min_depth_cm):
+               panel_set_name, panel_defs, output_path, min_depth_cm,
+               boundaries=None, start_zone_mask=None):
     n = len(panel_defs)
-    fig, axes = plt.subplots(1, n, figsize=(6 * n, 5.5))
-    if n == 1:
-        axes = [axes]
+    if n <= 3:
+        nrows, ncols = 1, n
+    else:
+        ncols = 3
+        nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols,
+                             figsize=(7 * ncols, 5.5 * nrows))
+    axes = np.array(axes).ravel()
+    # Hide unused axes for non-divisible panel counts
+    for ax in axes[n:]:
+        ax.set_visible(False)
 
     is_event = abs((timestamp - EVENT_DATE).days) <= 1
     title_suffix = "  *** JAN 18 EVENT ***" if is_event else ""
@@ -198,8 +364,24 @@ def plot_frame(grids, dem, hillshade, bounds, timestamp,
         ax.imshow(hillshade, cmap='gray', extent=bounds, alpha=0.5, aspect='auto')
         grid = grids.get(var)
         if grid is not None:
+            # Compute colorscale from start zone only when mask available
+            # — outside pixels have thin/patchy snow with extreme values
+            if start_zone_mask is not None:
+                scale_pixels = grid[start_zone_mask & ~np.isnan(grid)]
+            else:
+                scale_pixels = grid[~np.isnan(grid)]
+            if vmin is None and len(scale_pixels):
+                vmin = float(np.percentile(scale_pixels, 2))
+            if vmax is None and len(scale_pixels):
+                vmax = float(np.percentile(scale_pixels, 98))
             im = ax.imshow(grid, cmap=cmap, vmin=vmin, vmax=vmax,
                            extent=bounds, alpha=0.85, aspect='auto')
+            # Dim pixels outside start zone so they don't distract
+            if start_zone_mask is not None:
+                outside = np.where(~start_zone_mask,
+                                    np.ones_like(grid) * 0.6, np.nan)
+                ax.imshow(outside, cmap='gray', vmin=0, vmax=1,
+                          extent=bounds, alpha=0.35, aspect='auto')
             plt.colorbar(im, ax=ax, shrink=0.75, label=label)
             if threshold is not None:
                 try:
@@ -207,10 +389,19 @@ def plot_frame(grids, dem, hillshade, bounds, timestamp,
                                linewidths=0.6, linestyles='--', extent=bounds)
                 except Exception:
                     pass
+        if boundaries:
+            sz = boundaries.get('start_zone')
+            if sz:
+                ax.plot(sz[0], sz[1], color='limegreen', linewidth=1.2, alpha=0.85)
+            ra = boundaries.get('release_area')
+            if ra:
+                ax.plot(ra[0], ra[1], color='red', linewidth=1.8, alpha=0.9)
+            for xs, ys in boundaries.get('release_area_multi', []):
+                ax.plot(xs, ys, color='red', linewidth=1.8, alpha=0.9)
         ax.set_title(label, fontsize=10)
         ax.set_xticks([]); ax.set_yticks([])
 
-    depth_str = f"buried >{min_depth_cm:.0f}cm"
+    depth_str = "stability at WL interface"
     fig.suptitle(
         f"Little Professor  |  {timestamp.strftime('%Y-%m-%d')}  |  "
         f"{panel_set_name}  |  {depth_str}{title_suffix}",
@@ -226,7 +417,7 @@ def plot_frame(grids, dem, hillshade, bounds, timestamp,
 # =====================================================================
 
 def write_html_flipbook(base_dir: Path, frame_names: list, min_depth: float):
-    """Three-tab flipbook: loading / stability / propagation."""
+    """Four-tab flipbook: loading / stability / propagation / structure."""
     files_js = '[' + ', '.join(f'"{f}"' for f in frame_names) + ']'
     n = len(frame_names)
 
@@ -239,7 +430,7 @@ def write_html_flipbook(base_dir: Path, frame_names: list, min_depth: float):
   body {{ font-family: sans-serif; background:#1a1a1a; color:#eee;
           display:flex; flex-direction:column; align-items:center; padding:16px; }}
   h2   {{ margin-bottom:6px; font-size:16px; }}
-  .tabs {{ display:flex; gap:8px; margin:10px 0; }}
+  .tabs {{ display:flex; gap:8px; margin:10px 0; flex-wrap:wrap; justify-content:center; }}
   .tab  {{ padding:6px 18px; font-size:13px; cursor:pointer;
             background:#333; color:#ccc; border:1px solid #555;
             border-radius:4px; }}
@@ -254,19 +445,24 @@ def write_html_flipbook(base_dir: Path, frame_names: list, min_depth: float):
   #date-label {{ font-size:14px; min-width:110px; text-align:center; }}
   .event-banner {{ background:#8b0000; color:#fff; padding:4px 16px;
                    border-radius:4px; font-size:13px; display:none; }}
+  .legend {{ font-size:11px; color:#aaa; margin:4px 0; }}
 </style>
 </head>
 <body>
 <h2>Little Professor — SNOWPACK Stability Analysis</h2>
 <div style="font-size:12px;color:#aaa;margin-bottom:4px;">
-  buried layers &gt;{min_depth:.0f}cm | Jan 18 = skier-triggered D2 event
+  Stability at WL interface | Jan 18 = skier-triggered D2 event
+  <span class="legend"> | <span style="color:limegreen">&#9646;</span> start zone
+  | <span style="color:red">&#9646;</span> release area</span>
 </div>
 <div class="tabs">
-  <button class="tab active" onclick="setPanel('loading',this)">Loading (HS / dHS/dt)</button>
-  <button class="tab" onclick="setPanel('stability',this)">Stability (Sk38 / SSI / Sn38)</button>
-  <button class="tab" onclick="setPanel('propagation',this)">Propagation (TG / ATG / SDR)</button>
+  <button class="tab active" onclick="setPanel('loading',this)">&#9601; Loading (HS / dHS/dt)</button>
+  <button class="tab" onclick="setPanel('stability',this)">&#9734; Stability (Sk38 / SSI / Sn38)</button>
+  <button class="tab" onclick="setPanel('propagation',this)">&#x2605; Propagation (TG / ATG / SDR)</button>
+  <button class="tab" onclick="setPanel('structure',this)">&#x2736; Structure (WL / Slab)</button>
+  <button class="tab" onclick="setPanel('meloche',this)">&#x2605; Meloche (E / Λ / τ_g)</button>
 </div>
-<div class="event-banner" id="event-banner">JAN 18 EVENT WINDOW</div>
+<div class="event-banner" id="event-banner">&#9888; JAN 18 EVENT WINDOW &#9888;</div>
 <img id="frame" src="loading/{frame_names[0]}" alt="frame">
 <div class="controls">
   <button onclick="prev()">&#9664; Prev</button>
@@ -286,7 +482,6 @@ def write_html_flipbook(base_dir: Path, frame_names: list, min_depth: float):
 </div>
 <script>
 const frames = {files_js};
-const eventDate = '20260118';
 let idx=0, playing=false, interval=null, delay=200, panel='loading';
 
 function show(i) {{
@@ -295,7 +490,8 @@ function show(i) {{
   document.getElementById('frame').src = panel+'/'+f;
   document.getElementById('date-label').textContent = f.replace('.png','');
   document.getElementById('slider').value = idx;
-  const near = f.replace('.png','') >= '20260117' && f.replace('.png','') <= '20260119';
+  const d = f.replace('.png','');
+  const near = d >= '20260117' && d <= '20260119';
   document.getElementById('event-banner').style.display = near ? 'block' : 'none';
 }}
 function next()  {{ show(idx+1); }}
@@ -317,9 +513,11 @@ document.addEventListener('keydown', e=>{{
   if(e.key==='ArrowRight') next();
   if(e.key==='ArrowLeft')  prev();
   if(e.key===' ') {{ e.preventDefault(); togglePlay(); }}
-  if(e.key==='1') setPanel('loading', document.querySelectorAll('.tab')[0]);
-  if(e.key==='2') setPanel('stability', document.querySelectorAll('.tab')[1]);
+  if(e.key==='1') setPanel('loading',     document.querySelectorAll('.tab')[0]);
+  if(e.key==='2') setPanel('stability',   document.querySelectorAll('.tab')[1]);
   if(e.key==='3') setPanel('propagation', document.querySelectorAll('.tab')[2]);
+  if(e.key==='4') setPanel('structure',   document.querySelectorAll('.tab')[3]);
+  if(e.key==='5') setPanel('meloche',     document.querySelectorAll('.tab')[4]);
 }});
 </script>
 </body>
@@ -329,10 +527,6 @@ document.addEventListener('keydown', e=>{{
     out.write_text(html)
     print(f"HTML flipbook -> {out}")
 
-
-# =====================================================================
-# Main
-# =====================================================================
 
 def main():
     parser = argparse.ArgumentParser(
@@ -345,6 +539,12 @@ def main():
                         default=Path('/home/ron/snowpack/little_prof/output/slope_snowpack.zarr'),
                         help='Path to Zarr cache (created on first run)')
     parser.add_argument('--min-depth', type=float, default=DEFAULT_MIN_DEPTH)
+    parser.add_argument('--force', action='store_true',
+                        help='Regenerate all frames even if cached')
+    parser.add_argument('--wl-method', choices=['simple', 'grain_type'],
+                        default='simple',
+                        help='WL/slab split method: simple=bottom 20%% of HS '
+                             '(fast), grain_type=FC/DH grain detection (slow)')
     parser.add_argument('--max-depth', type=float, default=DEFAULT_MAX_DEPTH)
     args = parser.parse_args()
 
@@ -363,6 +563,24 @@ def main():
         transform = src.transform
 
     cluster_map = np.load(str(cfg.analysis_dir / "cluster_map.npy"))
+
+    # Load boundary overlays (KML + GeoJSON)
+    try:
+        boundaries = _load_boundary_polys(cfg.project_dir, transform)
+        print(f"Boundaries loaded: {list(boundaries.keys())}")
+    except Exception as e:
+        print(f"Warning: could not load boundaries ({e})")
+        boundaries = {}
+
+    # Rasterize start zone KML for colorscale masking
+    start_zone_mask_raster = None
+    try:
+        from analyze_release_zone import kml_to_mask
+        start_zone_mask_raster = kml_to_mask(
+            cfg.start_zone_kml, dem.shape, transform)
+        print(f"Start zone mask: {start_zone_mask_raster.sum()} cells")
+    except Exception as e:
+        print(f"Warning: could not build start zone mask ({e})")
 
     bounds = [transform[2],
               transform[2] + dem.shape[1] * transform[0],
@@ -400,7 +618,7 @@ def main():
             (base_dir / pname / f"{date_str}.png").exists()
             for pname in PANEL_SETS
         )
-        if all_exist:
+        if all_exist and not args.force:
             print(f"  [{i+1:3d}/{len(daily_noons)}] {date_str}: cached")
             # Still need to advance prev_hs_state
             if not prev_hs_state:
@@ -409,7 +627,8 @@ def main():
             continue
 
         scalars, prev_hs_state = reduce_at_time(
-            ds, ts, prev_hs_state, args.min_depth, args.max_depth)
+            ds, ts, prev_hs_state, args.min_depth, args.max_depth,
+            wl_method=args.wl_method)
 
         grids = {var: scalars_to_grid(scalars[var], location_names, cluster_map)
                  for var in scalars}
@@ -417,14 +636,20 @@ def main():
         for panel_name, panel_defs in PANEL_SETS.items():
             out_path = base_dir / panel_name / f"{date_str}.png"
             plot_frame(grids, dem, hillshade, bounds, ts,
-                       panel_name, panel_defs, out_path, args.min_depth)
+                       panel_name, panel_defs, out_path, args.min_depth,
+                       boundaries=boundaries,
+                       start_zone_mask=start_zone_mask_raster)
 
         print(f"  [{i+1:3d}/{len(daily_noons)}] {date_str}: written")
 
-    write_html_flipbook(base_dir, frame_names, args.min_depth)
+    # Always rebuild flipbook from ALL frames on disk, not just
+    # those generated in this run — stays correct across partial runs.
+    all_frames = sorted(f.name for f in (base_dir / 'loading').glob('*.png'))
+    write_html_flipbook(base_dir, all_frames or frame_names, args.min_depth)
     print(f"\nDone. Open: {base_dir / 'index.html'}")
     print("Keyboard: arrows=prev/next, space=play/pause, 1/2/3=panel tabs")
 
 
 if __name__ == '__main__':
     main()
+    
