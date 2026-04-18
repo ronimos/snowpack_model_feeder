@@ -58,6 +58,28 @@ for Highway Avalanche Operations" — Ron, Ryan, Valerie, Snook et al.
       compare whether Π₁ separation between release/adjacent grows toward
       event. Would show the instability signal developing spatially.
 
+- [ ] **Release geometry: cross-slope propagation from Gaume et al. (2015)**
+      Gaume et al. (2015, The Cryosphere, doi:10.5194/tc-9-795-2015):
+      'Influence of weak layer heterogeneity and slab properties on slab
+      tensile failure propensity and avalanche release area.' Use their
+      framework alongside DEM-derived slope angle to estimate cross-slope
+      release width. The slope angle map from the DEM constrains lateral
+      extent — terrain that steepens cross-slope acts as a natural arrest
+      boundary. Combine with Meloche A_ca (upslope) to define a 2D release
+      polygon rather than relying solely on the observed Jan 18 boundary.
+
+- [ ] **Stauchwall location from slope angle threshold (~28°)**
+      Multiple sources converge on ~28° as the lower bound for slab release
+      terrain (Perzl 2007 JRC; Swiss ALIP/PRA; Maggioni & Gruber; Bühler
+      et al.; Veitinger et al. 2016). Use the DEM slope raster to find where
+      slope angle drops below 28° downslope of the trigger point — this
+      approximates the stauchwall location and sets the downslope release
+      polygon boundary. Intersection of: (a) Meloche A_ca upslope limit,
+      (b) 28° slope threshold downslope limit, (c) start zone KML lateral
+      bounds, (d) cross-slope Gaume heterogeneity constraint → defines a
+      physically-motivated release polygon without requiring the observed
+      event boundary as input.
+
 - [ ] **`step_scenarios()` in `pipeline.py`** — standardized output schema
       feeding com1DFA: release_zones.geojson, scenario depth rasters (P10-P90),
       scenario_weights.json, weak_layer_params.json, mcmc_bounds.json.
@@ -94,6 +116,18 @@ for Highway Avalanche Operations" — Ron, Ryan, Valerie, Snook et al.
 
 - [ ] **Cron-compatible pipeline wrapper**.
 
+- [ ] **Post-avalanche SNOWPACK reinitialization** — after a detected
+      avalanche event, reset the snowpack within the release area to
+      bare ground (bed surface height). SNOWPACK restarts from a `.sno`
+      file; clusters inside the detected release polygon get their `.sno`
+      rewritten with HS set to the bed surface elevation and all layers
+      cleared. This is critical for operational accuracy: without it,
+      SNOWPACK accumulates a phantom slab in cells that actually released,
+      producing incorrect stability indices in subsequent timesteps.
+      Implementation: detect event from `avalanche.py`, identify affected
+      cluster IDs via release polygon overlap with `cluster_map.npy`,
+      rewrite their `.sno` files, rerun SNOWPACK forward from event date.
+
 ---
 
 ## Priority 4 — Transport Model
@@ -120,6 +154,17 @@ for Highway Avalanche Operations" — Ron, Ryan, Valerie, Snook et al.
       fully captured. Try erosion_sigma=1.2 or secondary fill pass.
 
 - [ ] **Run on all survey periods** — validate no false positives in clean periods.
+
+- [ ] **Min-kernel auto-detection of release area** — investigate whether
+      a morphological minimum kernel applied to the dHS anomaly raster can
+      auto-detect release zone boundaries without relying on Canny edges.
+      The idea: a minimum filter with a kernel sized to the expected crown
+      width highlights the local minima (maximum erosion) that correspond
+      to the crown and flanks of a slab. Advantages over Canny: no edge
+      threshold tuning, naturally connected regions, less sensitive to
+      local noise. Compare detected boundaries against Jan 18 observed
+      release area and against current Canny+watershed results.
+      Reference: scipy.ndimage.minimum_filter, skimage.morphology.erosion.
 
 - [ ] **Jan 18 retrospective** — SNOWPACK precursor signals in crown clusters.
 

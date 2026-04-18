@@ -130,6 +130,95 @@ def _make_depth_raster(
 #   size weights:    [0.05, 0.20, 0.50, 0.20, 0.05]  (log-normal P10-P90)
 ```
 
+## Release polygon geometry — full 2D approach
+
+The release polygon is defined by four independent constraints that together
+replace the need for the observed event boundary as input:
+
+```
+Upslope boundary:   Meloche et al. (2025) A_ca (brittle)
+                    → crack arrest length from τ_p, θ, Λ, σ_t at trigger point
+
+Downslope boundary: Slope angle ≈ 28° threshold (stauchwall approximation)
+                    → multiple sources: Perzl (2007) JRC; Swiss ALIP/PRA;
+                      Maggioni & Gruber; Bühler et al.; Veitinger et al. (2016)
+                    → find first pixel downslope of trigger where
+                      slope drops below 28° using DEM gradient raster
+
+Cross-slope width:  Gaume et al. (2015, The Cryosphere, tc-9-795-2015)
+                    → "Influence of weak layer heterogeneity and slab properties
+                      on slab tensile failure propensity and avalanche release area"
+                    → weak layer strength heterogeneity + slab properties
+                      control cross-slope tensile failure extent
+                    → complement with DEM cross-slope curvature / aspect change
+                      as natural arrest boundaries
+
+Lateral bounds:     Start zone KML (hard constraint — no release outside
+                    known avalanche terrain)
+```
+
+Implementation sketch:
+```python
+def make_release_polygon_2d(trigger_cluster, dem, slope_raster,
+                             meloche_df, start_zone_mask, transform):
+    # 1. Trigger centroid in UTM
+    cx, cy = cluster_centroid(trigger_cluster)
+
+    # 2. Upslope limit: A_ca along fall line from trigger
+    A_ca    = meloche_df.loc[trigger_cluster, 'A_ca_brittle']
+    up_pt   = project_upslope(cx, cy, A_ca, dem, transform)
+
+    # 3. Downslope limit: walk downslope until slope < 28°
+    down_pt = first_pixel_below_threshold(cx, cy, slope_raster,
+                                          threshold_deg=28.0, transform)
+
+    # 4. Cross-slope width from Gaume 2015 heterogeneity proxy
+    theta_cross = meloche_df.loc[neighbors_cross_slope, 'theta'].mean()
+    width = gaume_cross_slope_width(A_ca, theta_cross, slab_props)
+
+    # 5. Build oriented rectangle, intersect with start_zone_mask
+    poly = oriented_rectangle(up_pt, down_pt, width, dem, transform)
+    return poly.intersection(start_zone_mask_polygon)
+```
+
+## Release polygon geometry — full 2D approach
+
+The release polygon is defined by four independent constraints that together
+replace the need for the observed event boundary as input:
+
+```
+Upslope boundary:   Meloche et al. (2025) A_ca (brittle)
+                    → crack arrest length from τ_p, θ, Λ, σ_t at trigger point
+
+Downslope boundary: Slope angle ~28° threshold (stauchwall approximation)
+                    → Perzl (2007) JRC; Swiss ALIP/PRA; Maggioni & Gruber;
+                      Bühler et al.; Veitinger et al. (2016)
+                    → first pixel downslope of trigger where slope < 28°
+
+Cross-slope width:  Gaume et al. (2015, The Cryosphere, tc-9-795-2015)
+                    "Influence of weak layer heterogeneity and slab properties
+                    on slab tensile failure propensity and avalanche release area"
+                    → cross-slope θ and slab properties control lateral extent
+                    → DEM cross-slope curvature as natural arrest boundaries
+
+Lateral bounds:     Start zone KML (hard constraint)
+```
+
+Implementation sketch:
+```python
+def make_release_polygon_2d(trigger_cluster, dem, slope_raster,
+                             meloche_df, start_zone_mask, transform):
+    cx, cy  = cluster_centroid(trigger_cluster)
+    A_ca    = meloche_df.loc[trigger_cluster, 'A_ca_brittle']
+    up_pt   = project_upslope(cx, cy, A_ca, dem, transform)
+    down_pt = first_pixel_below_threshold(cx, cy, slope_raster,
+                                          threshold_deg=28.0, transform)
+    theta_cross = meloche_df.loc[neighbors_cross_slope, 'theta'].mean()
+    width   = gaume_cross_slope_width(A_ca, theta_cross, slab_props)
+    poly    = oriented_rectangle(up_pt, down_pt, width, dem, transform)
+    return poly.intersection(start_zone_mask_polygon)
+```
+
 ## Notes on com1DFA interface
 
 AvaFrame com1DFA expects:
@@ -143,6 +232,61 @@ The `scenarios/scenario_NNN/` output is designed so that a thin AvaFrame
 wrapper can iterate over subdirectories and call com1DFA once per scenario
 without needing to know about the upstream pipeline.
 
+
+## Release polygon geometry — full 2D approach
+
+The release polygon is defined by four independent constraints, replacing the
+need for the observed event boundary as input:
+
+**Upslope boundary** — Meloche et al. (2025) A_ca (brittle): crack arrest
+length from τ_p, θ, Λ, σ_t at the trigger cluster.
+
+**Downslope boundary** — Slope angle ~28° threshold (stauchwall approximation).
+Multiple sources converge on this value: Perzl (2007) JRC report; Swiss
+ALIP/PRA models; Maggioni & Gruber; Bühler et al.; Veitinger et al. (2016).
+Implementation: walk downslope from trigger cluster along the fall line until
+slope drops below 28° in the DEM gradient raster.
+
+**Cross-slope width** — Gaume et al. (2015, The Cryosphere, tc-9-795-2015),
+"Influence of weak layer heterogeneity and slab properties on slab tensile
+failure propensity and avalanche release area." Cross-slope θ (WL strength
+gradient between laterally adjacent clusters) and slab elastic properties
+control the lateral extent of tensile failure. DEM cross-slope curvature and
+aspect changes provide additional arrest constraints.
+
+**Lateral bounds** — Start zone KML (hard constraint, no release outside
+known avalanche terrain).
+
+The four constraints together define an oriented polygon that is physically
+motivated end-to-end. For Jan 18 validation, this polygon can be compared
+directly against the observed release area GeoJSON.
+
+
+## Release polygon geometry -- full 2D approach
+
+The release polygon is defined by four independent constraints, replacing the
+need for the observed event boundary as input:
+
+**Upslope boundary** -- Meloche et al. (2025) A_ca (brittle): crack arrest
+length from tau_p, theta, Lambda, sigma_t at the trigger cluster.
+
+**Downslope boundary** -- Slope angle ~28 degrees threshold (stauchwall
+approximation). Multiple sources converge on this value: Perzl (2007) JRC;
+Swiss ALIP/PRA; Maggioni & Gruber; Buhler et al.; Veitinger et al. (2016).
+Walk downslope from trigger along fall line until slope < 28 degrees in DEM.
+
+**Cross-slope width** -- Gaume et al. (2015, The Cryosphere, tc-9-795-2015),
+"Influence of weak layer heterogeneity and slab properties on slab tensile
+failure propensity and avalanche release area." Cross-slope theta and slab
+elastic properties control the lateral extent of tensile failure. DEM
+cross-slope curvature provides additional arrest constraints.
+
+**Lateral bounds** -- Start zone KML (hard constraint).
+
+The four constraints together define an oriented polygon that is physically
+motivated end-to-end. Compare against observed Jan 18 release area GeoJSON
+for validation.
+
 ## Open questions before implementing
 
 1. Road polygon — need US-6 milepost geometry for P(exceedance)
@@ -150,3 +294,4 @@ without needing to know about the upstream pipeline.
 3. Voellmy parameters for Little Professor — calibrated or default?
 4. Whether release polygon should be constrained to the observed Jan 18
    release area boundary for validation, or free to vary
+   
