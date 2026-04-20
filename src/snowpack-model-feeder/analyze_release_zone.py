@@ -42,399 +42,16 @@ from pyproj import Transformer
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import xsnow
 from config import ProjectConfig
+from snowpack_io import load_dataset, kml_to_mask
+from snowpack_analysis import (
+    geojson_to_mask, assign_cluster_groups,
+    split_wl_slab, profile_features,
+    extract_group_timeseries, compute_meloche_features,
+    EVENT_DATE, WL_TYPES, SLAB_TYPES,
+    GROUP_COLORS, GROUP_LABELS,
+)
 
-EVENT_DATE = pd.Timestamp("2026-01-18")
 
-# SNOWPACK grain type codes (first digit = class)
-WL_TYPES   = set(range(400, 500)) | set(range(500, 600))  # FC (4xx) and DH (5xx)
-SLAB_TYPES = set(range(200, 300)) | set(range(300, 400))  # DF (2xx) and RG (3xx)
-
-GROUP_COLORS = {
-    'release':  '#d32f2f',
-    'adjacent': '#1976d2',
-    'reference': '#666666',
-}
-GROUP_LABELS = {
-    'release':  'Release zone',
-    'adjacent': 'Adjacent slope (start zone)',
-    'reference': 'Reference (terrain-matched)',
-}
-
-
-# -----------------------------------------------------------------------
-# Geometry helpers
-# -----------------------------------------------------------------------
-
-def _reproject_lonlat_to_utm(pts_lonlat):
-    t = Transformer.from_crs('EPSG:4326', 'EPSG:32613', always_xy=True)
-    return [t.transform(x, y) for x, y in pts_lonlat]
-
-
-def geojson_to_mask(path, dem_shape, transform) -> np.ndarray:
-    from shapely.geometry import shape
-    from shapely.ops import unary_union
-
-    with open(str(path)) as f:
-        gj = json.load(f)
-    polys = [shape(feat['geometry']) for feat in gj['features']]
-    merged = unary_union(polys)
-
-    def reproj(poly):
-        from shapely.geometry import Polygon, MultiPolygon
-        def ring(r): return _reproject_lonlat_to_utm(list(r.coords))
-        if poly.geom_type == 'Polygon':
-            return Polygon(ring(poly.exterior),
-                           [ring(i) for i in poly.interiors])
-        return MultiPolygon([reproj(p) for p in poly.geoms])
-
-    merged_utm = reproj(merged)
-    aff = transform if hasattr(transform, 'c') else rt.Affine(*transform[:6])
-    mask = rasterio.features.geometry_mask(
-        [merged_utm.__geo_interface__], out_shape=dem_shape,
-        transform=aff, invert=True)
-    print(f"  Release zone mask:  {mask.sum()} cells")
-    return mask
-
-
-def kml_to_mask(kml_path, dem_shape, transform) -> np.ndarray:
-    from xml.etree import ElementTree as ET
-    from shapely.geometry import Polygon
-
-    tree  = ET.parse(str(kml_path))
-    ctext = (tree.find('.//coordinates') or
-             tree.find('.//{http://www.opengis.net/kml/2.2}coordinates'))
-    if ctext is None:
-        return np.ones(dem_shape, dtype=bool)
-
-    pts = [tuple(map(float, p.split(',')[:2]))
-           for p in ctext.text.strip().split() if ',' in p]
-    poly = Polygon(_reproject_lonlat_to_utm(pts))
-    aff  = transform if hasattr(transform, 'c') else rt.Affine(*transform[:6])
-    mask = rasterio.features.geometry_mask(
-        [poly.__geo_interface__], out_shape=dem_shape,
-        transform=aff, invert=True)
-    print(f"  Start zone mask:    {mask.sum()} cells")
-    return mask
-
-
-# -----------------------------------------------------------------------
-# Cluster assignment
-# -----------------------------------------------------------------------
-
-def assign_cluster_groups(cluster_map, release_mask, start_zone_mask,
-                           dem, domain_mask) -> dict:
-    """
-    Assign clusters to groups. Reference group is terrain-matched to
-    release zone (similar elevation and slope angle).
-    """
-    fill_dem = np.where(np.isnan(dem), np.nanmean(dem), dem)
-    dy, dx   = np.gradient(fill_dem, 1.0)
-    slope    = np.degrees(np.arctan(np.sqrt(dx**2 + dy**2)))
-
-    # Release zone terrain statistics for matching
-    rel_elev_mean  = float(np.nanmean(dem[release_mask & domain_mask]))
-    rel_elev_std   = float(np.nanstd(dem[release_mask & domain_mask]))
-    rel_slope_mean = float(np.nanmean(slope[release_mask & domain_mask]))
-
-    groups = {'release': set(), 'adjacent': set(), 'reference': set()}
-
-    for cid in np.unique(cluster_map[domain_mask]):
-        if cid <= 0:
-            continue
-        cells = cluster_map == cid
-        n     = cells.sum()
-        if n == 0:
-            continue
-
-        frac_rel   = (cells & release_mask).sum() / n
-        frac_start = (cells & start_zone_mask).sum() / n
-
-        if frac_rel >= 0.3:
-            groups['release'].add(cid)
-        elif frac_start >= 0.3:
-            groups['adjacent'].add(cid)
-        else:
-            # Terrain-match: within 1 std of release zone elevation
-            c_elev  = float(np.nanmean(dem[cells]))
-            c_slope = float(np.nanmean(slope[cells]))
-            if (abs(c_elev - rel_elev_mean) < rel_elev_std * 1.5 and
-                    abs(c_slope - rel_slope_mean) < 10.0):
-                groups['reference'].add(cid)
-
-    for g, ids in groups.items():
-        print(f"  {GROUP_LABELS[g]}: {len(ids)} clusters")
-    return groups
-
-
-# -----------------------------------------------------------------------
-# Weak layer / slab boundary detection
-# -----------------------------------------------------------------------
-
-def split_wl_slab(grain_type, z):
-    """
-    Find the BASAL weak layer by scanning upward from the bottom.
-
-    The persistent weak layer (early-season facets/depth hoar) sits at
-    the base. Near-surface facets are NOT the target WL.
-
-    Strategy: scan from the bottom upward through FC/DH layers (4xx/5xx),
-    stop at the FIRST transition to slab types (code < 400).
-    That initial FC/DH block = basal WL. Everything above = slab.
-
-    Returns (slab_mask, wl_mask, interface_z) or (None, None, None).
-    """
-    ok = ~np.isnan(grain_type) & ~np.isnan(z) & (z != 0) & (grain_type > 0)
-    if ok.sum() < 3:
-        return None, None, None
-
-    gt_ok = np.round(grain_type[ok]).astype(int)
-    z_ok  = z[ok]
-
-    # Sort bottom-to-top: z is negative (depth below surface), most-negative = deepest
-    order        = np.argsort(z_ok)
-    gt_sorted    = gt_ok[order]
-    z_sorted     = z_ok[order]
-    is_wl_sorted = (gt_sorted // 100) >= 4   # FC=4xx, DH=5xx
-
-    # Must start with at least one WL layer at the base
-    if not is_wl_sorted[0]:
-        return None, None, None
-
-    # Walk upward: find top of the first contiguous basal WL block
-    wl_top_sorted = 0
-    for i in range(len(is_wl_sorted)):
-        if is_wl_sorted[i]:
-            wl_top_sorted = i
-        else:
-            break   # first non-WL layer = interface
-
-    interface_z = float(z_sorted[wl_top_sorted])
-
-    # Map back to original array indices
-    ok_indices = np.where(ok)[0]
-    orig_order = ok_indices[order]
-
-    slab_mask = np.zeros(len(grain_type), dtype=bool)
-    wl_mask   = np.zeros(len(grain_type), dtype=bool)
-    for sorted_i, orig_i in enumerate(orig_order):
-        if sorted_i <= wl_top_sorted:
-            wl_mask[orig_i] = True
-        else:
-            slab_mask[orig_i] = True
-
-    return slab_mask, wl_mask, interface_z
-def profile_features(ds_t_loc, min_depth_cm: float) -> dict:
-    """
-    Extract slab and WL features for one cluster at one timestep.
-
-    Stability indices: min value within ±5cm of WL/slab interface.
-    Slab properties:   mean over slab layers above interface.
-    WL properties:     mean over WL layers.
-    """
-    z  = ds_t_loc['z'].values.ravel()
-    gt = ds_t_loc['grain_type'].values.ravel()
-    hs_arr = ds_t_loc['HS'].values.ravel()
-    hs = float(np.nanmean(hs_arr))
-
-    ok = ~np.isnan(z) & ~np.isnan(gt) & (z != 0) & (gt > 0)
-    if ok.sum() < 2:
-        return {}
-
-    result = {'hs': hs}
-    nu = 0.3   # Poisson's ratio (fixed, Gaume et al. 2018)
-
-    slab_m, wl_m, interface_z = split_wl_slab(gt, z)
-
-    if slab_m is None:
-        return result
-
-    # --- Stability at interface (±5cm = ±0.05m) ---
-    near_interface = ok & (np.abs(z - interface_z) <= 0.05)
-    for var in ('sk38', 'ssi', 'sn38', 'stab_deformation_rate'):
-        try:
-            v = ds_t_loc[var].values.ravel()
-            vals = v[near_interface & ~np.isnan(v)]
-            result[f'min_{var}'] = float(np.nanmin(vals))                 if len(vals) else np.nan
-        except Exception:
-            result[f'min_{var}'] = np.nan
-
-    # --- Slab properties ---
-    if slab_m.any():
-        for var, agg in [('density',       np.nanmean),
-                         ('hand_hardness', np.nanmean),
-                         ('grain_size',    np.nanmean)]:
-            try:
-                v = ds_t_loc[var].values.ravel()
-                vals = v[slab_m & ~np.isnan(v)]
-                result[f'slab_{var}'] = float(agg(vals)) if len(vals) else np.nan
-            except Exception:
-                result[f'slab_{var}'] = np.nan
-
-        # Slab thickness: height from interface to snow surface
-        slab_z = z[slab_m & ok]
-        # slab thickness = distance from interface to surface = -interface_z / 100
-        result['slab_thickness'] = float(-interface_z / 100.0)                   if len(slab_z) else np.nan
-
-        # Most common grain type in slab (first digit = grain class)
-        gt_slab = np.round(gt[slab_m & ok]).astype(int)
-        gt_slab = gt_slab[gt_slab > 0]
-        if len(gt_slab):
-            classes, counts = np.unique(gt_slab // 100, return_counts=True)
-            result['slab_dominant_grain_class'] = int(classes[np.argmax(counts)])
-        else:
-            result['slab_dominant_grain_class'] = np.nan
-
-        # --- Crust/ice layer detection (MF=7xx, IF=8xx) ---
-        gt_slab_all = np.round(gt[slab_m & ok]).astype(int)
-        z_slab_all  = z[slab_m & ok]
-        is_crust    = (gt_slab_all // 100) >= 7
-        result['has_crust']      = bool(is_crust.any())
-        result['n_crust_layers'] = int(is_crust.sum())
-        result['crust_thickness'] = float(
-            (z_slab_all[is_crust].max() - z_slab_all[is_crust].min()) / 100.0
-        ) if is_crust.any() else 0.0
-        # Crust immediately above WL (<10cm of interface) — bridging layer
-        near_iface = np.abs(z_slab_all - interface_z) <= 10.0
-        result['crust_at_interface'] = bool((is_crust & near_iface).any())
-        # Depth of shallowest crust (m below surface)
-        result['crust_top_depth'] = float(
-            -z_slab_all[is_crust].max() / 100.0
-        ) if is_crust.any() else np.nan
-    else:
-        for k in ('slab_density', 'slab_hand_hardness', 'slab_grain_size',
-                  'slab_thickness', 'slab_dominant_grain_class',
-                  'has_crust', 'n_crust_layers', 'crust_thickness',
-                  'crust_at_interface', 'crust_top_depth'):
-            result[k] = np.nan
-
-    # --- WL properties ---
-    if wl_m.any():
-        for var, agg in [('shear_strength', np.nanmean),
-                         ('grain_size',     np.nanmean),
-                         ('density',        np.nanmean),
-                         ('hand_hardness',  np.nanmean)]:
-            try:
-                v = ds_t_loc[var].values.ravel()
-                vals = v[wl_m & ~np.isnan(v)]
-                result[f'wl_{var}'] = float(agg(vals)) if len(vals) else np.nan
-            except Exception:
-                result[f'wl_{var}'] = np.nan
-
-        wl_z = z[wl_m & ok]
-        result['wl_burial_depth'] = float(-wl_z.max() / 100.0)          if len(wl_z) else np.nan
-        result['wl_thickness']    = float(wl_z.max() - wl_z.min())      if len(wl_z) else np.nan
-        result['interface_z']     = float(interface_z)
-    else:
-        for k in ('wl_shear_strength', 'wl_grain_size', 'wl_density',
-                  'wl_hand_hardness', 'wl_burial_depth', 'wl_thickness',
-                  'interface_z'):
-            result[k] = np.nan
-
-    # --- Meloche et al. (2025) parameters (per-cluster, no neighbors needed) ---
-    rho   = result.get('slab_density',      np.nan)
-    h_m   = result.get('slab_thickness',    np.nan)   # m
-    D_wl  = result.get('wl_thickness',      np.nan)   # cm (from z)
-    tau_p = result.get('wl_shear_strength', np.nan)   # Pa
-
-    if all(not np.isnan(v) for v in [rho, h_m, D_wl, tau_p]) and D_wl > 0:
-        D_wl_m  = D_wl / 100.0                           # cm -> m
-        # Slab elastic modulus — power law fit to van Herwijnen et al. (2016) range
-        # ~2 MPa at ρ=200, ~4 MPa at ρ=300, ~6 MPa at ρ=350 kg/m³
-        E_slab  = (rho / 300.0)**2.5 * 4.0e6             # Pa
-        # Slab tensile strength — ~5 kPa at ρ=300 kg/m³ (Meloche 2-10 kPa range)
-        sigma_t = (rho / 300.0)**1.4 * 5.0e3             # Pa
-        G_wl    = 0.2e6                                   # Pa (Reiweger et al. 2010)
-        E_prime = E_slab / (1.0 - nu**2)                 # apparent Young's modulus
-        K_wl    = G_wl / D_wl_m                          # WL stiffness (Pa/m)
-        Lambda  = float(np.sqrt(E_prime * h_m / K_wl))  # characteristic elastic length (m)
-        result['E_slab']  = E_slab
-        result['sigma_t'] = sigma_t
-        result['Lambda']  = Lambda
-        result['K_wl']    = K_wl
-    else:
-        for k in ('E_slab', 'sigma_t', 'Lambda', 'K_wl'):
-            result[k] = np.nan
-    return result
-
-
-# -----------------------------------------------------------------------
-# Time series extraction
-# -----------------------------------------------------------------------
-
-def extract_group_timeseries(ds, group_ids: set,
-                              location_names,
-                              min_depth_cm: float,
-                              end_ts: pd.Timestamp,
-                              per_cluster: bool = False) -> pd.DataFrame:
-    """
-    Extract feature time series for a group of clusters.
-
-    per_cluster=False (default): returns group-median DataFrame indexed by time.
-      Used for plotting.
-
-    per_cluster=True: returns one row per (cluster_id, time), with columns
-      for all features. Used for the classifier — each cluster is a sample.
-    """
-    if not group_ids:
-        return pd.DataFrame()
-
-    loc_mask = np.array([
-        int(str(loc).split('_')[-1]) in group_ids
-        for loc in location_names])
-    if not loc_mask.any():
-        return pd.DataFrame()
-
-    ds_group   = ds.isel(location=loc_mask)
-    loc_ids    = [int(str(loc).split('_')[-1])
-                  for loc in location_names[loc_mask]]
-    times      = pd.DatetimeIndex(ds_group.coords['time'].values)
-    noon_ts    = [t for t in times if t.hour == 12 and t <= end_ts]
-
-    all_rows = []
-    for ts in noon_ts:
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            ds_t = ds_group.sel(time=ts, method='nearest').compute()
-
-        n_locs = ds_t.sizes.get('location', 1)
-        ts_rows = []
-        for i in range(n_locs):
-            try:
-                ds_loc = ds_t.isel(location=i) \
-                    if 'location' in ds_t.dims else ds_t
-                feat = profile_features(ds_loc, min_depth_cm)
-                if feat:
-                    feat['time']       = ts
-                    feat['cluster_id'] = loc_ids[i] if i < len(loc_ids) else -1
-                    ts_rows.append(feat)
-            except Exception:
-                continue
-
-        if not ts_rows:
-            continue
-
-        if per_cluster:
-            all_rows.extend(ts_rows)
-        else:
-            # Group median for plotting
-            keys = [k for k in ts_rows[0]
-                    if k not in ('time', 'cluster_id')]
-            row = {'time': ts}
-            for k in keys:
-                vals = [f[k] for f in ts_rows
-                        if k in f and f[k] is not None
-                        and not np.isnan(f[k])]
-                row[k] = float(np.nanmedian(vals)) if vals else np.nan
-            all_rows.append(row)
-
-    if not all_rows:
-        return pd.DataFrame()
-
-    if per_cluster:
-        df = pd.DataFrame(all_rows)
-        df['time'] = pd.to_datetime(df['time'])
-        return df.set_index(['time', 'cluster_id']).sort_index()
-    return pd.DataFrame(all_rows).set_index('time').sort_index()
 
 
 # -----------------------------------------------------------------------
@@ -999,178 +616,6 @@ def plot_meloche_comparison(meloche_df: pd.DataFrame, plots_dir: Path,
     print(f"Meloche comparison plot: {out}")
 
 
-def compute_meloche_features(snap_data: dict, cluster_map: np.ndarray,
-                              dem: np.ndarray, transform,
-                              snap_ts) -> pd.DataFrame:
-    """
-    Compute Meloche et al. (2025) spatial features requiring neighbor information.
-
-    For each cluster computes:
-      τ_g  — gravitational shear stress (Pa)
-      θ    — WL shear strength gradient to k nearest neighbors (Pa/m)
-      Π₁   — elastic dimensionless number: τ_g / (θ·Λ·√(1+δ))
-      Π₂   — brittle dimensionless number: Π₁ · √(σ_t/τ_g)
-      A_ca — crack arrest length estimate from brittle scaling (m)
-      L_t  — quasi-static tensile length (m)
-
-    Parameters match Meloche et al. (2025) Table 1:
-      ψ  = slope angle per cluster (from DEM)
-      ϕ  = 27° (snow friction angle, fixed)
-      δ  = 1   (softening coefficient, fixed — slope scale default)
-      L_ss = 20 m (steady-state length, fixed — paper default)
-
-    Returns DataFrame indexed by cluster_id with Meloche features.
-    """
-    PHI_DEG = 27.0          # snow friction angle (degrees)
-    DELTA   = 1.0           # softening coefficient
-    L_SS    = 20.0          # steady-state length (m)
-    K_NEIGHBORS = 6         # nearest neighbors for θ computation
-    G_GRAV  = 9.81          # m/s²
-
-    phi_rad = np.radians(PHI_DEG)
-
-    # Compute slope angle per cluster from DEM
-    fill_dem = np.where(np.isnan(dem), np.nanmean(dem), dem)
-    dy, dx   = np.gradient(fill_dem, 1.0)
-    slope    = np.degrees(np.arctan(np.sqrt(dx**2 + dy**2)))
-
-    # Compute cluster centroids in pixel space
-    cluster_ids = np.unique(cluster_map[~np.isnan(dem)])
-    cluster_ids = cluster_ids[cluster_ids > 0]
-
-    centroids = {}  # cluster_id -> (row_mean, col_mean)
-    slopes_cl = {}  # cluster_id -> mean slope angle (deg)
-    for cid in cluster_ids:
-        mask = cluster_map == cid
-        rows, cols = np.where(mask)
-        if len(rows):
-            centroids[cid]  = (float(rows.mean()), float(cols.mean()))
-            slopes_cl[cid]  = float(slope[mask].mean())
-
-    # Collect per-cluster τ_p, Λ, E, σ_t from snap_data
-    all_rows = []
-    for grp, df in snap_data.items():
-        if df.empty:
-            continue
-        df2 = df.copy()
-        df2['group'] = grp
-        all_rows.append(df2)
-
-    if not all_rows:
-        return pd.DataFrame()
-
-    features = pd.concat(all_rows)
-    if 'wl_shear_strength' not in features.columns:
-        return pd.DataFrame()
-
-    # Build array of centroid positions for distance computation
-    cids_arr   = np.array([cid for cid in features.index
-                           if cid in centroids])
-    if len(cids_arr) < 2:
-        return pd.DataFrame()
-
-    cents = np.array([centroids[c] for c in cids_arr])  # (N, 2) pixel coords
-    # Convert pixel distance to meters (1m resolution DEM)
-    # cents are in pixels, pixel size = 1m
-    def _scalar(df, cid, col):
-        """Safely extract a scalar from a possibly multi-row index."""
-        if cid not in df.index:
-            return np.nan
-        val = df.loc[cid, col]
-        if isinstance(val, pd.Series):
-            return float(val.iloc[0])
-        return float(val)
-
-    # wl_shear_strength from SNOWPACK is in kPa; Meloche uses Pa
-    tau_p_arr = np.array([_scalar(features, c, 'wl_shear_strength')
-                          for c in cids_arr]) * 1000.0  # kPa -> Pa
-
-    # KNN for θ computation
-    from sklearn.neighbors import NearestNeighbors
-    nbrs = NearestNeighbors(n_neighbors=min(K_NEIGHBORS+1, len(cids_arr)),
-                             algorithm='ball_tree').fit(cents)
-    distances, indices = nbrs.kneighbors(cents)
-
-    rows_out = []
-    for i, cid in enumerate(cids_arr):
-        if cid not in features.index:
-            continue
-        loc_data = features.loc[cid]
-        row = (loc_data.iloc[0].copy()
-               if isinstance(loc_data, pd.DataFrame)
-               else loc_data.copy())
-        tau_p = row.get('wl_shear_strength', np.nan) * 1000.0  # kPa -> Pa
-        Lambda = row.get('Lambda', np.nan)
-        E_slab = row.get('E_slab', np.nan)
-        sigma_t = row.get('sigma_t', np.nan)
-        rho   = row.get('slab_density', np.nan)
-        h_m   = row.get('slab_thickness', np.nan)
-        psi_deg = slopes_cl.get(cid, np.nan)
-
-        if any(np.isnan(v) for v in [tau_p, Lambda, rho, h_m, psi_deg]):
-            rows_out.append({'cluster_id': cid})
-            continue
-
-        psi_rad = np.radians(psi_deg)
-        sin_psi = np.sin(psi_rad)
-        if sin_psi < 0.01:
-            rows_out.append({'cluster_id': cid})
-            continue
-
-        # Gravitational shear stress (driving stress)
-        tau_g = rho * G_GRAV * h_m * sin_psi * (1.0 - np.tan(phi_rad)/np.tan(psi_rad))
-        tau_g = max(tau_g, 0.1)   # avoid negative/zero on flat terrain
-
-        # θ — mean WL shear strength gradient to k nearest neighbors
-        neighbor_idx = indices[i][1:]   # exclude self
-        neighbor_dist = distances[i][1:]
-        theta_vals = []
-        for j, d in zip(neighbor_idx, neighbor_dist):
-            if d < 1e-6:
-                continue
-            tau_j = tau_p_arr[j]
-            if not np.isnan(tau_j):
-                theta_vals.append(abs(tau_p - tau_j) / d)
-
-        theta = float(np.mean(theta_vals)) if theta_vals else np.nan
-
-        if np.isnan(theta) or theta < 1e-6:
-            rows_out.append({'cluster_id': cid, 'tau_g': tau_g, 'theta': theta,
-                             'slope_angle': psi_deg})
-            continue
-
-        # Dimensionless numbers (Eqs. 19, 20)
-        denom   = theta * Lambda * np.sqrt(1.0 + DELTA)
-        Pi1     = tau_g / denom                           # elastic number
-        Pi2     = Pi1 * np.sqrt(sigma_t / tau_g)         # brittle number
-
-        # Quasi-static tensile length (normalisation for brittle Aca)
-        L_t     = sigma_t / (rho * G_GRAV * sin_psi *
-                              (1.0 - np.tan(phi_rad)/np.tan(psi_rad)))
-
-        # Crack arrest length estimates (proportionality from Eqs. 19, 20)
-        # Proportionality constant ≈ 1 from Figure 7/10 (1:1 line in log scale)
-        A_ca_elastic = L_SS * Pi1**(1.5)
-        A_ca_brittle = L_t  * Pi1 * np.sqrt(sigma_t / tau_g)
-
-        rows_out.append({
-            'cluster_id':    cid,
-            'slope_angle':   psi_deg,
-            'tau_g':         tau_g,
-            'theta':         theta,
-            'Pi1_elastic':   Pi1,
-            'Pi2_brittle':   Pi2,
-            'Lambda':        Lambda,
-            'L_t':           L_t,
-            'A_ca_elastic':  A_ca_elastic,
-            'A_ca_brittle':  A_ca_brittle,
-        })
-
-    if not rows_out:
-        return pd.DataFrame()
-    return pd.DataFrame(rows_out).set_index('cluster_id')
-
-
 # -----------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------
@@ -1190,6 +635,11 @@ def main():
                         help='Date for snapshot analysis (default: day before event)')
     parser.add_argument('--classifier', action='store_true',
                         help='Train RF classifier and plot feature importance')
+    parser.add_argument('--all-clusters', action='store_true',
+                        help='Also extract features for ALL start zone '
+                             'clusters (not just release+adjacent groups). '
+                             'Saves all_start_zone_features_YYYY-MM-DD.csv '
+                             'for use by the probabilistic boundary model.')
     parser.add_argument('--cross-date-test', action='store_true',
                         help='Train on snapshot date, score other survey dates')
     args = parser.parse_args()
@@ -1335,7 +785,7 @@ def main():
         # Plot Meloche comparison
         plot_meloche_comparison(meloche_df, cfg.plots_dir, snap_ts)
 
-    # --- Save feature table ---
+    # --- Save feature table (release + adjacent + reference groups) ---
     out_csv = cfg.analysis_dir / f"release_zone_features_{snap_ts.date()}.csv"
     rows = []
     for grp, df in snap_data.items():
@@ -1347,6 +797,90 @@ def main():
     if rows:
         pd.concat(rows).to_csv(str(out_csv))
         print(f"Feature table saved: {out_csv}")
+
+    # --- All start zone clusters (for probabilistic boundary model) ---
+    if args.all_clusters:
+        print("\nExtracting features for ALL start zone clusters...")
+        print("(Required for probabilistic boundary model signed features)")
+
+        # All cluster IDs in start zone
+        all_sz_ids = set(int(c) for c in np.unique(cluster_map[start_zone_mask])
+                         if c > 0)
+        # Already-processed IDs
+        done_ids   = set()
+        for df in snap_data.values():
+            if not df.empty:
+                done_ids.update(df.index.tolist())
+        remaining_ids = all_sz_ids - done_ids
+        print(f"  Total start zone clusters: {len(all_sz_ids)}")
+        print(f"  Already processed:         {len(done_ids)}")
+        print(f"  Remaining to process:      {len(remaining_ids)}")
+
+        loc_mask = np.array([
+            int(str(loc).split('_')[-1]) in remaining_ids
+            for loc in location_names])
+
+        all_rows = []
+        if loc_mask.any():
+            ds_all = ds.isel(location=loc_mask)
+            loc_ids_all = [int(str(loc).split('_')[-1])
+                           for loc in location_names[loc_mask]]
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                ds_t_all = ds_all.sel(
+                    time=snap_ts, method='nearest').compute()
+            n_all = ds_t_all.sizes.get('location', 1)
+            for i in range(n_all):
+                try:
+                    ds_loc = ds_t_all.isel(location=i) \
+                        if 'location' in ds_t_all.dims else ds_t_all
+                    feat = profile_features(ds_loc, args.min_depth)
+                    if feat:
+                        feat['cluster_id'] = loc_ids_all[i]
+                        feat['group']      = 'start_zone'
+                        all_rows.append(feat)
+                except Exception:
+                    continue
+            print(f"  Extracted features for {len(all_rows)} additional clusters")
+
+        # Merge with existing snap_data and save
+        existing_rows = []
+        for grp, df in snap_data.items():
+            if df.empty: continue
+            df2 = df.copy(); df2['group'] = grp
+            existing_rows.append(df2)
+        all_dfs = existing_rows
+        if all_rows:
+            all_dfs.append(
+                pd.DataFrame(all_rows).set_index('cluster_id'))
+        if all_dfs:
+            all_features_df = pd.concat(all_dfs)
+            # Deduplicate — existing group assignments take priority
+            all_features_df = all_features_df[
+                ~all_features_df.index.duplicated(keep='first')]
+            out_all = (cfg.analysis_dir /
+                       f"all_start_zone_features_{snap_ts.date()}.csv")
+            all_features_df.to_csv(str(out_all))
+            print(f"  All start zone features saved: {out_all}")
+            print(f"  Total clusters: {len(all_features_df)}")
+
+        # Recompute Meloche features over full start zone
+        if all_dfs:
+            snap_data_full = {}
+            for grp, df in snap_data.items():
+                snap_data_full[grp] = df
+            if all_rows:
+                snap_data_full['start_zone'] = (
+                    pd.DataFrame(all_rows).set_index('cluster_id'))
+            print("  Recomputing Meloche features over full start zone...")
+            meloche_full = compute_meloche_features(
+                snap_data_full, cluster_map, dem, transform, snap_ts)
+            if not meloche_full.empty:
+                out_mel_all = (cfg.analysis_dir /
+                               f"meloche_features_all_{snap_ts.date()}.csv")
+                meloche_full.to_csv(str(out_mel_all))
+                print(f"  Full Meloche features saved: {out_mel_all} "
+                      f"({len(meloche_full)} clusters)")
 
 
 if __name__ == '__main__':

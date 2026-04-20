@@ -33,7 +33,11 @@ import xarray as xr
 import xsnow
 
 from config import ProjectConfig
-from pyproj import Transformer as _Transformer
+from snowpack_io import load_dataset, load_boundaries, kml_to_mask
+from snowpack_analysis import (
+    split_wl_slab, reduce_scalars_at_time,
+    EVENT_DATE,
+)
 
 # =====================================================================
 # Constants
@@ -51,8 +55,6 @@ SSI_CRIT  = 1.5
 SN38_CRIT = 1.0
 TG_CRIT   = 10.0   # °C/m — active faceting threshold
 
-# Jan 18 event date for annotation
-EVENT_DATE = pd.Timestamp("2026-01-18")
 
 # Panel definitions: (var_name, label, cmap, vmin, vmax, threshold, invert_good)
 # invert_good=True means low values are bad (e.g. stability indices)
@@ -94,230 +96,26 @@ PANEL_SETS = {
 # Load all clusters — lazy via Dask
 # =====================================================================
 
-# =====================================================================
-# Boundary overlay helpers
-# =====================================================================
-
-def _load_boundary_polys(project_dir: Path, dem_transform):
-    """
-    Load start zone KML and release area GeoJSON, reproject to UTM,
-    return as lists of (xs, ys) tuples in map coordinates.
-    """
-    import json
-    from xml.etree import ElementTree as ET
-    from shapely.geometry import shape
-    from shapely.ops import unary_union
-
-    t = _Transformer.from_crs('EPSG:4326', 'EPSG:32613', always_xy=True)
-
-    def lonlat_to_map(pts_lonlat):
-        return [t.transform(x, y) for x, y in pts_lonlat]
-
-    boundaries = {}
-
-    # Start zone KML
-    kml_path = project_dir / 'data' / 'boundaries' / 'Litte_prof_start_zone.kml'
-    if kml_path.exists():
-        tree = ET.parse(str(kml_path))
-        ns   = '{http://www.opengis.net/kml/2.2}'
-        ct   = (tree.find('.//coordinates') or
-                tree.find(f'.//{ns}coordinates'))
-        if ct is not None:
-            pts = [tuple(map(float, p.split(',')[:2]))
-                   for p in ct.text.strip().split() if ',' in p]
-            utm = lonlat_to_map(pts)
-            boundaries['start_zone'] = ([x for x, y in utm],
-                                         [y for x, y in utm])
-
-    # Release area GeoJSON
-    gj_path = project_dir / 'data' / 'boundaries' / 'avalanche_release_area.geojson'
-    if gj_path.exists():
-        with open(str(gj_path)) as f:
-            gj = json.load(f)
-        polys = [shape(feat['geometry']) for feat in gj['features']]
-        merged = unary_union(polys)
-
-        def reproj(poly):
-            from shapely.geometry import Polygon, MultiPolygon
-            def ring(r): return lonlat_to_map(list(r.coords))
-            if poly.geom_type == 'Polygon':
-                return Polygon(ring(poly.exterior),
-                               [ring(i) for i in poly.interiors])
-            return MultiPolygon([reproj(p) for p in poly.geoms])
-
-        utm_poly = reproj(merged)
-        if utm_poly.geom_type == 'Polygon':
-            xs = list(utm_poly.exterior.xy[0])
-            ys = list(utm_poly.exterior.xy[1])
-            boundaries['release_area'] = (xs, ys)
-        elif utm_poly.geom_type == 'MultiPolygon':
-            segs = []
-            for p in utm_poly.geoms:
-                segs.append((list(p.exterior.xy[0]),
-                              list(p.exterior.xy[1])))
-            boundaries['release_area_multi'] = segs
-
-    return boundaries
+# Boundary helpers delegated to snowpack_io
+# load_boundaries() and kml_to_mask() imported above
 
 
 def load_all_clusters(pro_dir: Path,
                       zarr_path: Path | None = None) -> xr.Dataset:
-    if zarr_path and zarr_path.exists():
-        print(f"Loading dataset from Zarr: {zarr_path}...")
-        dr = xr.open_zarr(str(zarr_path))
-        ds = xsnow.xsnowDataset(dr)
-        print(f"  Dataset dims: {dict(ds.sizes)}")
-        return ds
-    pro_files = list(pro_dir.glob("cluster_*.pro"))
-    if not pro_files:
-        raise FileNotFoundError(f"No cluster .pro files in {pro_dir}")
-    print(f"Loading {len(pro_files)} .pro files from {pro_dir}...")
-    ds = xsnow.read(str(pro_dir))
-    if zarr_path and isinstance(ds, xsnow.xsnowDataset):
-        print(f"  Saving to Zarr: {zarr_path}...")
-        ds.data.to_zarr(str(zarr_path), mode='w')
-        print(f"  Zarr saved.")
-    print(f"  Dataset dims: {dict(ds.sizes)}")
-    return ds
+    """Thin wrapper — delegates to snowpack_io.load_dataset."""
+    return load_dataset(pro_dir, zarr_path=zarr_path)
 
 
 # =====================================================================
 # Per-frame reduction
 # =====================================================================
 
-def reduce_at_time(ds: xr.Dataset,
-                   timestamp: pd.Timestamp,
-                   prev_hs: dict,
-                   min_depth_cm: float,
-                   max_depth_cm: float,
-                   wl_method: str = 'simple') -> dict:
-    """
-    Reduce all variables to per-cluster scalars at one timestep.
-
-    prev_hs: dict mapping location -> HS value at previous timestep,
-             used to compute dHS/dt.
-    """
-    ds_t = ds.sel(time=timestamp, method='nearest')
-
-    z   = ds_t['z']
-    in_depth = (z <= -min_depth_cm) & (z >= -max_depth_cm) & (~np.isnan(z))
-
-    def layer_min(var):
-        return (ds_t[var].where(in_depth)
-                         .min(dim='layer')
-                         .squeeze([d for d in ['slope','realization'] if d in ds_t.dims])
-                         .compute().values)
-
-    def layer_mean(var):
-        return (ds_t[var].where(in_depth)
-                         .mean(dim='layer')
-                         .squeeze([d for d in ['slope','realization'] if d in ds_t.dims])
-                         .compute().values)
-
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        hs       = ds_t['HS'].squeeze([d for d in ['slope','realization'] if d in ds_t.dims]).compute().values
-        sk38_min = layer_min('sk38')
-        ssi_min  = layer_min('ssi')
-        sn38_min = layer_min('sn38')
-        tg_min   = layer_min('temperature_gradient')
-        atg_mean = layer_mean('accumulated_temperature_gradient')
-        sdr_min  = layer_min('stab_deformation_rate')
-
-    # dHS/dt in cm/day from previous timestep
-    locs = ds.coords['location'].values
-    if prev_hs:
-        dt_days = (timestamp - prev_hs['time']).total_seconds() / 86400
-        if dt_days > 0:
-            dhs_dt = (hs - prev_hs['hs']) / dt_days
-        else:
-            dhs_dt = np.zeros_like(hs)
-    else:
-        dhs_dt = np.zeros_like(hs)
-
-    # --- Structure variables (WL/slab properties) ---
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        sq_dims   = [d for d in ['slope','realization'] if d in ds_t.dims]
-        hs_vals   = ds_t['HS'].squeeze(sq_dims).compute().values
-        z_da      = ds_t['z'].squeeze(sq_dims).compute()   # (location, layer)
-
-        if wl_method == 'simple':
-            # Fast: bottom 20% of HS = WL proxy, top 80% = slab
-            hs_bc     = xr.DataArray(hs_vals, dims=['location'])
-            wl_zone   = (z_da < -0.8 * hs_bc) & ~np.isnan(z_da)
-            slab_zone = (z_da > -0.8 * hs_bc) & (z_da < 0) & ~np.isnan(z_da)
-            wl_burial_raw  = hs_vals * 0.8 / 100.0
-            slab_thick_raw = hs_vals * 0.8 / 100.0
-        else:
-            # Proper: FC/DH grain-type detection per cluster
-            import sys as _sys
-            from pathlib import Path as _Path
-            _sys.path.insert(0, str(_Path(__file__).resolve().parent))
-            from analyze_release_zone import split_wl_slab
-            z_np  = z_da.values          # (location, layer)
-            gt_np = ds_t['grain_type'].squeeze(sq_dims).compute().values
-            n_loc = z_np.shape[0]
-            wl_mask_np   = np.zeros(z_np.shape, dtype=bool)
-            slab_mask_np = np.zeros(z_np.shape, dtype=bool)
-            wl_burial_raw  = np.full(n_loc, np.nan)
-            slab_thick_raw = np.full(n_loc, np.nan)
-            for li in range(n_loc):
-                sm, wm, iz = split_wl_slab(gt_np[li], z_np[li])
-                if sm is not None:
-                    wl_mask_np[li]   = wm
-                    slab_mask_np[li] = sm
-                    wl_burial_raw[li]  = -iz / 100.0      # cm -> m
-                    slab_thick_raw[li] = -iz / 100.0
-            wl_zone   = xr.DataArray(wl_mask_np,   dims=z_da.dims)
-            slab_zone = xr.DataArray(slab_mask_np, dims=z_da.dims)
-
-        wl_str_raw = (ds_t['shear_strength'].squeeze(sq_dims).where(wl_zone)
-                      .mean(dim='layer').compute().values)
-        wl_grain_raw = (ds_t['grain_size'].squeeze(sq_dims).where(wl_zone)
-                        .mean(dim='layer').compute().values)
-        slab_dens_raw = (ds_t['density'].squeeze(sq_dims).where(slab_zone)
-                         .mean(dim='layer').compute().values)
-
-        # Meloche et al. (2025) per-cluster parameters
-        # E and σ_t from slab density (power laws, van Herwijnen 2016)
-        E_slab_raw   = (slab_dens_raw / 300.0)**2.5 * 4.0    # MPa
-        sigma_t_raw  = (slab_dens_raw / 300.0)**1.4 * 5.0    # kPa
-        # Characteristic elastic length Λ = sqrt(E'·h·D_wl / G_wl)
-        G_wl_pa      = 0.2e6                                   # Pa
-        nu           = 0.3
-        E_prime_raw  = E_slab_raw * 1e6 / (1 - nu**2)         # Pa
-        D_wl_m       = np.where(slab_thick_raw > 0,
-                                slab_thick_raw * 0.2, np.nan)  # 20% of slab as WL
-        h_m          = slab_thick_raw
-        Lambda_raw   = np.where(
-            (h_m > 0) & (D_wl_m > 0),
-            np.sqrt(E_prime_raw * h_m * D_wl_m / G_wl_pa), np.nan)
-        # Gravitational driving stress τ_g (Pa)
-        # Use fixed slope ψ=32° (mean release zone slope)
-        psi, phi = np.radians(32), np.radians(27)
-        tau_g_raw = (slab_dens_raw * 9.81 * h_m *
-                     np.sin(psi) * (1 - np.tan(phi)/np.tan(psi)))
-
-    return {
-        'HS':          hs,
-        'dhs_dt':      dhs_dt,
-        'sk38_min':    sk38_min,
-        'ssi_min':     ssi_min,
-        'sn38_min':    sn38_min,
-        'tg_min':      np.abs(tg_min),
-        'atg_mean':    atg_mean,
-        'sdr_min':     sdr_min,
-        'wl_strength':  wl_str_raw,
-        'wl_grain':     wl_grain_raw,
-        'wl_burial':    wl_burial_raw,
-        'slab_thick':   slab_thick_raw,
-        'slab_density': slab_dens_raw,
-        'E_slab':       E_slab_raw,
-        'sigma_t':      sigma_t_raw,
-        'Lambda':       Lambda_raw,
-        'tau_g':        tau_g_raw,
-    }, {'hs': hs, 'time': timestamp}
+def reduce_at_time(ds, timestamp, prev_hs, min_depth_cm,
+                   max_depth_cm, wl_method='simple'):
+    """Delegates to snowpack_analysis.reduce_scalars_at_time."""
+    return reduce_scalars_at_time(
+        ds, timestamp, prev_hs, min_depth_cm, max_depth_cm,
+        wl_method=wl_method)
 
 
 # =====================================================================
@@ -566,7 +364,7 @@ def main():
 
     # Load boundary overlays (KML + GeoJSON)
     try:
-        boundaries = _load_boundary_polys(cfg.project_dir, transform)
+        boundaries = load_boundaries(cfg.project_dir)
         print(f"Boundaries loaded: {list(boundaries.keys())}")
     except Exception as e:
         print(f"Warning: could not load boundaries ({e})")
