@@ -20,6 +20,7 @@ wheels/
 # Local scripts and data
 data/eval
 temp/
+scripts/
 *.ipynb
 
 # Backups and temporary files
@@ -44,3 +45,4 @@ windninja/
 src/snowpack-model-feeder/windninja/
 windninja
 Miniforge3-Linux-x86_64.sh
+ffmpeg*/

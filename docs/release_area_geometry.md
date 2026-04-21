@@ -86,9 +86,9 @@ The trigger cluster is the nucleation point from which the BFS crack propagation
 
 ### 3.1 Candidate pool
 
-The initial candidate pool consists of all clusters assigned to the **release** or **adjacent** groups by `assign_cluster_groups()` in `snowpack_analysis.py`. These are the clusters within the start zone KML boundary whose terrain (elevation and slope) is compatible with avalanche release. Clusters outside the start zone (reference group) are excluded — they may have similar terrain but are not on the avalanche path.
+The initial candidate pool consists of **all clusters within the start zone KML boundary** that have valid entries in `snap_features`. Group assignment (release/adjacent/reference from `assign_cluster_groups()`) is not used for trigger selection — operationally, we do not know which clusters will be in the release area, so the trigger search must span the entire start zone. Groups are used only for the validation comparison and slab density estimation.
 
-Candidates must be present in `snap_features` (the release zone features CSV produced by `step_analyze`), which means they must have valid SNOWPACK output with a detectable basal weak layer at the snapshot date. Clusters where SNOWPACK failed to run, where HS was below the minimum depth threshold, or where no FC/DH basal WL was detected by `split_wl_slab()` are implicitly excluded because they have no entry in `snap_features`.
+Candidates must have valid SNOWPACK output with a detectable basal weak layer at the snapshot date. Clusters where SNOWPACK failed to run, where HS was below the minimum depth threshold, or where no FC/DH basal WL was detected by `split_wl_slab()` are implicitly excluded because they have no entry in `snap_features`.
 
 ### 3.2 Physical filters
 
@@ -123,6 +123,10 @@ When `--restrict-to-release-area` is set, an additional filter is applied before
 After filtering, remaining candidates are ranked by ascending Sk38 (most unstable first). The top `n_triggers` clusters are selected. With `--n-triggers 1`, only the single weakest cluster is used; with `--n-triggers 5`, the five weakest form a trigger-location ensemble axis.
 
 For the Jan 18 validation, the top-ranked trigger is cid=3178 with Sk38=0.05, located in the upper-left quadrant of the start zone — consistent with the observed crown position.
+
+![Multi-trigger release polygon comparison](fig_multi_trigger_2026-01-17.png)
+
+Five-trigger ensemble for the Jan 17 snapshot (day before event). Each trigger cluster (T1–T5, stars) produces a BFS-derived release polygon at size_factor=1.0. T1 (cid=3178, Sk38=0.05, A_ca=40 m) is the most unstable and produces the largest polygon (3,372 m²), closely matching the observed release area (red, 3,902 m²). T2–T5 have progressively higher Sk38 values and smaller or differently shaped polygons. Critically, all five triggers are located within or immediately adjacent to the observed release area — the physical filters (τ_g, slope, Sk38, elevation) successfully excluded the slope 10–20 m to the right of the observed right flank where five ski tracks were observed on the day of the event without triggering. This confirms that the trigger selection process identifies physically plausible nucleation points without relying on knowledge of the observed release boundary.
 
 ### 3.5 A_ca derivation
 
@@ -165,6 +169,10 @@ The most unstable trigger gets the highest weight. These weights multiply with t
 BFS flood-fill from trigger cluster through the cluster neighbour graph (k=8 nearest centroids). Arrested clusters become hard barriers — the crack cannot route around them. The release zone is the largest connected region of failed clusters. Implemented in `propagate_release()` in `release_geometry.py`.
 
 If the BFS returns None (e.g., trigger cluster fails all neighbours), the code falls back to an oriented rectangle constructed from A_ca (upslope), stauchwall walk (downslope), and Gaume cross-slope width, intersected with the start zone mask. This fallback is a conservative geometric estimate, not a physically resolved propagation.
+
+![Crack propagation animation](fig_crack_propagation.gif)
+
+BFS crack propagation from trigger cluster cid=3178 (white star), Jan 17 snapshot. Each frame advances one BFS ring outward through the k=8 cluster neighbour graph. Blue cells have propagated; arrested clusters are colored by arrest reason (teal = slab thickness discontinuity, red = stauchwall, purple = Λ discontinuity, orange = distance cap, gray = outside start zone, yellow = τ_g < 50 Pa). The crack expands rapidly through the homogeneous upper start zone, then arrests at the flanks where slab thickness and elastic length gradients exceed the threshold. The observed release area (red outline) is shown for reference. The final release polygon (343 propagated clusters, 33 BFS rings) closely matches the observed boundary — the right flank arrest is driven primarily by thickness discontinuity (THICKNESS_JUMP_FACTOR=0.25), consistent with the observed slab thinning at the margin.
 
 ### 4.2 Direction classification
 

@@ -232,8 +232,8 @@ def step_analyze(cfg, args):
               '--snapshot-date', args.snapshot_date]
     if args.classifier:
         cmd.append('--classifier')
-    if args.all_clusters:
-        cmd.append('--all-clusters')
+    # if args.all_clusters:
+    #    cmd.append('--all-clusters')
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
@@ -262,29 +262,48 @@ def step_scenarios(cfg, args):
     start_zone_mask = kml_to_mask(cfg.start_zone_kml, dem.shape, transform)
 
     # --- Load pre-computed analysis outputs ---
-    feat_csv = cfg.analysis_dir / f"release_zone_features_{args.snapshot_date}.csv"
-    mel_csv  = cfg.analysis_dir / f"meloche_features_{args.snapshot_date}.csv"
+    # Prefer full start zone features (from --all-clusters) over group-level.
+    # Group-level CSVs only cover release/adjacent/reference clusters,
+    # which is insufficient for operational trigger selection across the
+    # entire start zone.
+    feat_csv_all = cfg.analysis_dir / f"all_start_zone_features_{args.snapshot_date}.csv"
+    feat_csv_grp = cfg.analysis_dir / f"release_zone_features_{args.snapshot_date}.csv"
+    mel_csv_all  = cfg.analysis_dir / f"meloche_features_all_{args.snapshot_date}.csv"
+    mel_csv_grp  = cfg.analysis_dir / f"meloche_features_{args.snapshot_date}.csv"
 
-    if not feat_csv.exists():
+    if feat_csv_all.exists():
+        feat_csv = feat_csv_all
+    elif feat_csv_grp.exists():
+        feat_csv = feat_csv_grp
+        print(f"  WARNING: using group-level features ({feat_csv_grp.name}). "
+              f"Run 'analyze --all-clusters' for full start zone coverage.")
+    else:
         raise FileNotFoundError(
-            f"Run 'analyze' step first — missing {feat_csv}")
+            f"Run 'analyze' step first — missing features CSV")
+
+    mel_csv = mel_csv_all if mel_csv_all.exists() else mel_csv_grp
 
     snap_features = pd.read_csv(str(feat_csv), index_col=0)
     meloche_df    = pd.read_csv(str(mel_csv),  index_col=0) \
                    if mel_csv.exists() else pd.DataFrame()
+    print(f"  Features: {len(snap_features)} clusters from {feat_csv.name}")
+    print(f"  Meloche:  {len(meloche_df)} clusters from {mel_csv.name}")
 
     # --- Find trigger locations ---
-    # Candidate: clusters in start zone (release + adjacent) sorted by Sk38
-    # Restrict trigger candidates to clusters with meaningful driving stress
-    # τ_g → 0 near stauchwall (slope ≈ ϕ=27°) blows up the brittle scaling
+    # Candidate pool: ALL clusters within the start zone that have features.
+    # Group assignment (release/adjacent/reference) is for validation
+    # comparison, NOT for trigger selection — operationally we don't know
+    # which clusters will be in the release area.
     MIN_TAU_G   = 50.0   # Pa — below this the scaling law is not applicable
     MIN_SLOPE   = 30.0   # degrees — well above the 27° friction angle
     MAX_SK38    = 0.5    # Sk38 >= 0.5 means terrain is stable — not a valid trigger
 
-    candidate_ids = (groups.get('release', set()) |
-                     groups.get('adjacent', set()))
-    candidate_ids = [cid for cid in candidate_ids
+    # All clusters that overlap the start zone mask
+    sz_cids = set(int(c) for c in np.unique(cluster_map[start_zone_mask])
+                  if c > 0)
+    candidate_ids = [cid for cid in sz_cids
                      if cid in snap_features.index]
+    print(f"  Start zone clusters with features: {len(candidate_ids)}")
 
     def _scalar_val(df, cid, col):
         """Safely get a scalar from a possibly multi-row index."""
@@ -569,7 +588,7 @@ def main():
         description="Post-SNOWPACK analysis pipeline (Pipeline B)")
     parser.add_argument('step',
         choices=['zarr_build', 'analyze', 'scenarios', 'all'],
-        help="Pipeline step to run")
+        help="Pipeline step to run") 
 
     # Common
     parser.add_argument('--project-dir', type=Path, default=Path('.'))
@@ -585,11 +604,11 @@ def main():
 
     # analyze
     parser.add_argument('--classifier', action='store_true')
-    parser.add_argument('--all-clusters', action='store_true',
-                        help='Extract features for ALL start zone clusters. '
-                             'Produces all_start_zone_features and '
-                             'meloche_features_all CSVs for the '
-                             'probabilistic boundary model.')
+    #parser.add_argument('--all-clusters', action='store_true',
+    #                    help='Extract features for ALL start zone clusters. '
+    #                         'Produces all_start_zone_features and '
+    #                         'meloche_features_all CSVs for the '
+    #                         'probabilistic boundary model.')
 
     # scenarios
     parser.add_argument('--n-triggers',    type=int,   default=DEFAULT_N_TRIGGERS)
@@ -641,4 +660,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    
