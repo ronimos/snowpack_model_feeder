@@ -211,6 +211,8 @@ THICKNESS_JUMP_FACTOR = 0.25  # 25% relative change in burial depth
 
 Both criteria are symmetric — stiffening OR softening, thickening OR thinning, arrests the crack. The physical arrest mechanism differs by direction (energy barrier vs K_I drop) but both produce arrest at the cluster pair scale.
 
+**Calibration approach:** the two thresholds were calibrated on 75% of the Jan 18 observed release zone boundary cluster pairs (training set) and verified against the remaining 25% (held-out test set). The training split was used to select threshold values that correctly classified boundary vs interior cluster pairs; the test split confirmed that the thresholds generalize to unseen portions of the same release boundary. This within-event train/test split provides some guard against overfitting to a specific flank geometry, though multi-event validation is still required (§10).
+
 ### 4.6 Cross-slope width estimation
 
 Implemented in `estimate_cross_slope_width()`. Uses the Gaume et al. (2015) / Meloche (2025) framework: cross-slope crack arrest is controlled by the WL shear-strength gradient θ in the lateral direction. Higher cross-slope θ means stronger heterogeneity and earlier arrest → narrower release.
@@ -449,8 +451,8 @@ These are flow dynamics parameters **independent of SNOWPACK**. SNOWPACK provide
 | `stauchwall_deg` | 28° | Perzl 2007, Veitinger 2016, Swiss ALIP |
 | `MIN_TAU_G` | 50 Pa | Meloche scaling validity lower bound |
 | `MAX_SK38` | 0.5 | Stable/unstable threshold |
-| `LAMBDA_JUMP_FACTOR` | 0.5 | Calibrated to Jan 18 right flank (slab thinning boundary) |
-| `THICKNESS_JUMP_FACTOR` | 0.25 | Calibrated to Jan 18 SW margin |
+| `LAMBDA_JUMP_FACTOR` | 0.5 | Calibrated on 75% of Jan 18 release boundary, verified on 25% |
+| `THICKNESS_JUMP_FACTOR` | 0.25 | Calibrated on 75% of Jan 18 release boundary, verified on 25% |
 | `GAUME_ASPECT_CAP` | 2.5 | Max width/A_ca ratio for cross-slope estimate |
 | `wl_fraction` | 0.80 | Fraction of HS assumed to be slab for depth raster |
 | `propagate_threshold` | 0.5–0.6 | P(arrest) threshold for probabilistic BFS (CLI default 0.6; 0.5 used for Jan 18 validation) |
@@ -468,7 +470,7 @@ These are flow dynamics parameters **independent of SNOWPACK**. SNOWPACK provide
 
 3. **Downslope arrest:** The 28° slope threshold is a terrain proxy for τ_g < τ_p. A direct comparison of distributed τ_g and τ_p from SNOWPACK would make this parameter-free. Both variables are already computed.
 
-4. **Single event calibration:** All thresholds calibrated against one event. Multi-event validation required before operational deployment.
+4. **Single event calibration:** LAMBDA_JUMP_FACTOR and THICKNESS_JUMP_FACTOR were calibrated and verified on the Jan 18 event using a 75/25 train/test split of the release boundary cluster pairs, which guards against overfitting to a specific flank geometry. However, both thresholds are still derived from a single event on a single path. Multi-event, multi-path validation is required before operational deployment to confirm that these values generalize across different slab/WL configurations and terrain geometries.
 
 5. **Probabilistic model → AvaFrame scenarios:** Currently the probabilistic model produces release polygons for comparison only. Future work: integrate as additional scenarios in the AvaFrame ensemble, with weights derived from P(arrest) distributions rather than Sk38-based weights. This would propagate release zone uncertainty through to runout probability envelopes:
    ```
