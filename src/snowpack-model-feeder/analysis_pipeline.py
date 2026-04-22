@@ -603,7 +603,9 @@ def main():
     parser.add_argument('--max-layers', type=int, default=338)
 
     # analyze
-    parser.add_argument('--classifier', action='store_true')
+    parser.add_argument('--classifier', action='store_true',
+                        help='Use classifier-based features instead of regression-based. '
+                             'This will also generate the feature importance plot for the probabilistic boundary model. ')
     #parser.add_argument('--all-clusters', action='store_true',
     #                    help='Extract features for ALL start zone clusters. '
     #                         'Produces all_start_zone_features and '

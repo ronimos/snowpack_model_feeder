@@ -19,7 +19,7 @@ These approaches are intentionally separate. They have complementary failure mod
 
 The approach is motivated by the January 18, 2026 skier-triggered D2 slab avalanche on Little Professor, validated against the observed release area (3,902 m²) and the field observation that five ski tracks 10–20 m from the right flank did not trigger.
 
-![January 18, 2026 D2 slab avalanche on Little Professor, Loveland Pass](fig_jan18_avalanche_photo.jpeg)
+![January 18, 2026 D2 slab avalanche on Little Professor, Loveland Pass](assets/fig_jan18_avalanche_photo.jpeg)
 
 January 18, 2026 skier-triggered D2 slab avalanche on the Little Professor path, viewed from Loveland Ski Area. The release area is visible in the upper start zone (north-facing, above treeline), with the track running through sparse timber and the deposit terminating near US Highway 6. This event provides the end-to-end validation case for the model chain.
 
@@ -124,7 +124,7 @@ After filtering, remaining candidates are ranked by ascending Sk38 (most unstabl
 
 For the Jan 18 validation, the top-ranked trigger is cid=3178 with Sk38=0.05, located in the upper-left quadrant of the start zone — consistent with the observed crown position.
 
-![Multi-trigger release polygon comparison](fig_multi_trigger_2026-01-17.png)
+![Multi-trigger release polygon comparison](assets/fig_multi_trigger_2026-01-17.png)
 
 Five-trigger ensemble for the Jan 17 snapshot (day before event). Each trigger cluster (T1–T5, stars) produces a BFS-derived release polygon at size_factor=1.0. T1 (cid=3178, Sk38=0.05, A_ca=40 m) is the most unstable and produces the largest polygon (3,372 m²), closely matching the observed release area (red, 3,902 m²). T2–T5 have progressively higher Sk38 values and smaller or differently shaped polygons. Critically, all five triggers are located within or immediately adjacent to the observed release area — the physical filters (τ_g, slope, Sk38, elevation) successfully excluded the slope 10–20 m to the right of the observed right flank where five ski tracks were observed on the day of the event without triggering. This confirms that the trigger selection process identifies physically plausible nucleation points without relying on knowledge of the observed release boundary.
 
@@ -170,7 +170,7 @@ BFS flood-fill from trigger cluster through the cluster neighbour graph (k=8 nea
 
 If the BFS returns None (e.g., trigger cluster fails all neighbours), the code falls back to an oriented rectangle constructed from A_ca (upslope), stauchwall walk (downslope), and Gaume cross-slope width, intersected with the start zone mask. This fallback is a conservative geometric estimate, not a physically resolved propagation.
 
-![Crack propagation animation](fig_crack_propagation.gif)
+![Crack propagation animation](assets/fig_crack_propagation.gif)
 
 BFS crack propagation from trigger cluster cid=3178 (white star), Jan 17 snapshot. Each frame advances one BFS ring outward through the k=8 cluster neighbour graph. Blue cells have propagated; arrested clusters are colored by arrest reason (teal = slab thickness discontinuity, red = stauchwall, purple = Λ discontinuity, orange = distance cap, gray = outside start zone, yellow = τ_g < 50 Pa). The crack expands rapidly through the homogeneous upper start zone, then arrests at the flanks where slab thickness and elastic length gradients exceed the threshold. The observed release area (red outline) is shown for reference. The final release polygon (343 propagated clusters, 33 BFS rings) closely matches the observed boundary — the right flank arrest is driven primarily by thickness discontinuity (THICKNESS_JUMP_FACTOR=0.25), consistent with the observed slab thinning at the margin.
 
@@ -330,7 +330,7 @@ The boundary recall of 0.06 reflects the fundamental limitation of one event: 1,
 
 ## 6. Distributed Meloche Fields — Jan 17, 2026
 
-![Meloche feature fields](fig_meloche_fields_2026-01-17.png)
+![Meloche feature fields](assets/fig_meloche_fields_2026-01-17.png)
 
 Six-panel view of distributed slab and WL properties at the cluster scale, Jan 17 2026 (day before event). Red polygon = observed Jan 18 release area; green polygon = start zone boundary.
 
@@ -352,13 +352,13 @@ Both models place the polygon in the correct location (upper-left start zone). T
 
 ### 7.2 Physics BFS model — release polygon comparison
 
-![BFS release polygon comparison](fig_release_bfs_2026-01-17.png)
+![BFS release polygon comparison](assets/fig_release_bfs_2026-01-17.png)
 
 Blue = Meloche-derived BFS polygon (T1 cid=3178, Sk38=0.05, A_ca=40 m). Red = observed Jan 18 release area. Green = start zone boundary. Star marks the trigger nucleation point. The BFS polygon captures the upslope crown and left flank well; the right flank is slightly conservative (narrower than observed), consistent with the slab-thinning arrest at THICKNESS_JUMP_FACTOR=0.25.
 
 ### 7.3 Probabilistic model — release polygon comparison
 
-![Probabilistic release polygon comparison](fig_release_probabilistic_2026-01-17.png)
+![Probabilistic release polygon comparison](assets/fig_release_probabilistic_2026-01-17.png)
 
 Blue = probabilistic model polygon (P(arrest) threshold=0.5, 4,862 m²). The probabilistic model extends further left (upslope) and slightly further downslope than the observed release, producing a 25% overestimate. The boundary placement reflects the model's primary reliance on δτ_p gradients — it captures the right flank (strong τ_p gradient) but does not arrest as sharply on the left (where Λ gradients dominate).
 
