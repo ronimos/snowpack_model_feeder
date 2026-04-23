@@ -58,6 +58,10 @@
 
 - [ ] **Critical cut length** — expose SNOWPACK variable 0606 (critical crack length) via xsnow. Flag to Florian at SLF for xsnow API.
 
+- [ ] **P_unstable-based weak layer detection** — add SNOWPACK's `P_unstable` (profile instability index) as an alternative method for identifying the layer of concern, alongside the current grain-type-based basal WL detection (`split_wl_slab()` scanning upward through FC/DH codes). The current approach always targets the basal persistent WL, which is correct for the Jan 18 event but may miss mid-pack WLs that become the primary failure plane in different loading scenarios. `P_unstable` identifies the layer with the highest instability at each timestep regardless of position in the profile, which could capture: (1) mid-pack facet layers that become critical after burial by a storm slab, (2) transitions between basal and near-surface WL dominance as the season progresses, (3) cases where the most unstable interface is not the deepest FC/DH layer. Implementation: extract the layer index and depth of the max `P_unstable` value per cluster, use that as the WL/slab interface for `profile_features()` and `compute_meloche_features()`, compare Meloche parameters (Λ, A_ca, Π₁) between the two WL detection methods.
+
+- [ ] **BFS propagation at 1 m grid resolution** — test the BFS crack propagation model on the native 1 m DEM grid instead of the cluster neighbor graph, restricted to the area around the observed Jan 18 release area. Currently the BFS operates on ~6,636 clusters (~3 m median diameter); running at 1 m resolution within a cropped domain (~200×200 m around the release) would evaluate arrest criteria at the pixel scale (~64K cells but only ~4K in the cropped area). This would reveal whether cluster-scale smoothing of slab properties masks sharp gradients that control arrest at finer scales, and whether the BFS boundary converges to the same location as the cluster-based result. If boundaries differ meaningfully, the cluster resolution may need tightening (smaller `max_cells_per_cluster`) or the gradient thresholds may need recalibration for the finer grid. This is a diagnostic test — 1 m resolution across the full start zone is not operationally viable (would require ~65K SNOWPACK simulations).
+
 ---
 
 ## Probabilistic Model
@@ -81,3 +85,9 @@
 - [ ] **InSAR snow depth integration** — pipeline currently accepts UAS SfM and lidar. Add InSAR-derived snow depth as third input option (noted in ISSW abstract as future capability).
 
 - [ ] **Multi-path extension** — Seven Sisters, Star Mountain, Muleshoe paths beyond Little Professor. Requires per-path start zone KMLs and terrain parameters.
+
+---
+
+## Visualization / Presentation
+
+- [ ] **High-resolution avalanche photo with Google Earth overlay** — acquire a higher-quality version of the Jan 18 avalanche photo (current image is a phone photo from Loveland Ski Area). Georeference the release area, track, and deposit boundaries and export as a KMZ overlay for Google Earth. This would allow interactive comparison of the observed avalanche extent against the BFS/probabilistic model polygons in 3D terrain context, and produce presentation-quality figures showing the model chain output draped on satellite imagery.

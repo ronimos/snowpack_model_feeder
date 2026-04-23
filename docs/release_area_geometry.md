@@ -19,7 +19,7 @@ These approaches are intentionally separate. They have complementary failure mod
 
 The approach is motivated by the January 18, 2026 skier-triggered D2 slab avalanche on Little Professor, validated against the observed release area (3,902 m²) and the field observation that five ski tracks 10–20 m from the right flank did not trigger.
 
-![January 18, 2026 D2 slab avalanche on Little Professor, Loveland Pass](assets/fig_jan18_avalanche_photo.jpeg)
+![January 18, 2026 D2 slab avalanche on Little Professor, Loveland Pass](assets/fig_jan18_avalanche_photo.png)
 
 January 18, 2026 skier-triggered D2 slab avalanche on the Little Professor path, viewed from Loveland Ski Area. The release area is visible in the upper start zone (north-facing, above treeline), with the track running through sparse timber and the deposit terminating near US Highway 6. This event provides the end-to-end validation case for the model chain.
 
