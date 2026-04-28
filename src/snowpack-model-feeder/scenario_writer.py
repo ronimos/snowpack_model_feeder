@@ -134,7 +134,9 @@ def write_scenario(scenario_dir: Path,
                    weight: float,
                    mu: float = 0.155,
                    xi: float = 1500.0,
-                   profile: Optional[dict] = None) -> dict:
+                   profile: Optional[dict] = None,
+                   hand_hardness_depth_m: Optional[float] = None,
+                   hand_hardness_value: Optional[float] = None) -> dict:
     """
     Write one scenario directory with all AvaFrame com1DFA inputs.
 
@@ -157,6 +159,11 @@ def write_scenario(scenario_dir: Path,
     weight              : scenario probability weight
     mu, xi              : Voellmy friction parameters
     profile             : rasterio profile dict (if None, built from args)
+    hand_hardness_depth_m : depth (m) to first layer with hand hardness at
+                           trigger cluster (from SNOWPACK profile). None if
+                           not available.
+    hand_hardness_value : hand hardness index at that layer (SNOWPACK scale).
+                          None if not available.
     """
     out = scenario_dir / scenario_id
     out.mkdir(parents=True, exist_ok=True)
@@ -182,10 +189,17 @@ def write_scenario(scenario_dir: Path,
             'geometry': release_polygon.__geo_interface__,
             'properties': props,
         }
-        fc = {'type': 'FeatureCollection', 'features': [feature]}
+        fc = {
+            'type': 'FeatureCollection',
+            'crs': {
+                'type': 'name',
+                'properties': {'name': 'EPSG:6342'},
+            },
+            'features': [feature],
+        }
         (out / 'release.geojson').write_text(json.dumps(fc, indent=2))
 
-    # --- depth.tif + depth.asc ---
+    # --- depth.tif + depth.asc + depth.prj ---
     valid = depth_raster[~np.isnan(depth_raster)]
     if len(valid):
         mean_depth = float(np.mean(valid))
@@ -207,6 +221,25 @@ def write_scenario(scenario_dir: Path,
 
     write_asc(depth_raster, transform, out / 'depth.asc')
 
+    # Write .prj sidecar for depth.asc (EPSG:6342 — NAD83(2011) / UTM 13N)
+    prj_wkt = (
+        'PROJCS["NAD83(2011) / UTM zone 13N",'
+        'GEOGCS["NAD83(2011)",'
+        'DATUM["NAD83_National_Spatial_Reference_System_2011",'
+        'SPHEROID["GRS 1980",6378137,298.257222101]],'
+        'PRIMEM["Greenwich",0],'
+        'UNIT["degree",0.0174532925199433]],'
+        'PROJECTION["Transverse_Mercator"],'
+        'PARAMETER["latitude_of_origin",0],'
+        'PARAMETER["central_meridian",-105],'
+        'PARAMETER["scale_factor",0.9996],'
+        'PARAMETER["false_easting",500000],'
+        'PARAMETER["false_northing",0],'
+        'UNIT["metre",1],'
+        'AUTHORITY["EPSG","6342"]]'
+    )
+    (out / 'depth.prj').write_text(prj_wkt)
+
     # --- density.json ---
     (out / 'density.json').write_text(json.dumps({
         'mean_kgm3': round(density_mean, 1),
@@ -215,23 +248,30 @@ def write_scenario(scenario_dir: Path,
     }, indent=2))
 
     # --- params.json ---
-    (out / 'params.json').write_text(json.dumps({
-        'mu':             mu,
-        'xi':             xi,
-        'rho_kgm3':       round(density_mean, 1),
-        'release_area_m2':round(area_m2, 1),
-        'mean_depth_m':   round(mean_depth, 3),
-        'total_volume_m3':round(total_vol, 1),
-        'A_ca_m':         round(float(A_ca), 2),
-        'size_factor':    round(float(size_factor), 3),
+    params = {
+        'mu':               mu,
+        'xi':               xi,
+        'rho_kgm3':         round(density_mean, 1),
+        'release_area_m2':  round(area_m2, 1),
+        'mean_depth_m':     round(mean_depth, 3),
+        'total_volume_m3':  round(total_vol, 1),
+        'A_ca_m':           round(float(A_ca), 2),
+        'size_factor':      round(float(size_factor), 3),
         'depth_percentile': int(depth_percentile),
         'trigger_cluster':  int(trigger_cluster_id),
+        'scenario_probability': round(float(weight), 6),
         'note': ('Voellmy parameters: defaults. '
                  'Calibrate mu/xi against Jan 18 observation before '
                  'using for operational hazard mapping.'),
-    }, indent=2))
+    }
+    if hand_hardness_depth_m is not None:
+        params['hand_hardness_depth_m'] = round(float(hand_hardness_depth_m), 3)
+    if hand_hardness_value is not None:
+        params['hand_hardness_value'] = round(float(hand_hardness_value), 2)
 
-    return {
+    (out / 'params.json').write_text(json.dumps(params, indent=2))
+
+    row = {
         'scenario_id':      scenario_id,
         'trigger_cluster':  int(trigger_cluster_id),
         'A_ca_m':           round(float(A_ca), 2),
@@ -242,6 +282,12 @@ def write_scenario(scenario_dir: Path,
         'total_volume_m3':  round(total_vol, 1),
         'weight':           round(float(weight), 6),
     }
+    if hand_hardness_depth_m is not None:
+        row['hand_hardness_depth_m'] = round(float(hand_hardness_depth_m), 3)
+    if hand_hardness_value is not None:
+        row['hand_hardness_value'] = round(float(hand_hardness_value), 2)
+
+    return row
 
 
 # -----------------------------------------------------------------------
@@ -277,6 +323,7 @@ def write_summary_csv(rows: list[dict], out_path: Path) -> None:
         'scenario_id', 'trigger_cluster', 'A_ca_m', 'size_factor',
         'depth_percentile', 'release_area_m2', 'mean_depth_m',
         'total_volume_m3', 'weight',
+        'hand_hardness_depth_m', 'hand_hardness_value',
     ]
     for col in col_order:
         if col not in df.columns:
@@ -322,4 +369,4 @@ def write_metadata(out_path: Path,
         },
     }
     out_path.write_text(json.dumps(meta, indent=2))
-
+    

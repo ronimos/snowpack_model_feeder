@@ -289,6 +289,57 @@ def make_release_polygon_2d(
     """
     slope_grid, _ = compute_slope_aspect(dem)
 
+    # --- Build start zone polygon for post-clipping ---
+    # Both the BFS and fallback paths must clip to start zone + stauchwall
+    from shapely.geometry import Polygon, MultiPolygon
+    from shapely.ops import unary_union
+    import rasterio.features
+
+    sz_polygon = None
+    if start_zone_mask is not None:
+        shapes = list(rasterio.features.shapes(
+            start_zone_mask.astype(np.uint8),
+            mask=start_zone_mask, transform=transform))
+        if shapes:
+            sz_polygon = unary_union(
+                [Polygon(s['coordinates'][0]) for s, v in shapes if v == 1])
+
+    # Build stauchwall mask: only terrain ≥ stauchwall_deg can be in release
+    stauchwall_mask = slope_grid >= stauchwall_deg
+    sw_shapes = list(rasterio.features.shapes(
+        stauchwall_mask.astype(np.uint8),
+        mask=stauchwall_mask, transform=transform))
+    sw_polygon = None
+    if sw_shapes:
+        sw_polygon = unary_union(
+            [Polygon(s['coordinates'][0]) for s, v in sw_shapes if v == 1])
+        # Simplify to keep intersection fast — 1m tolerance at 1m grid
+        sw_polygon = sw_polygon.simplify(1.0, preserve_topology=True)
+
+    def _clip_polygon(poly):
+        """Clip polygon to start zone AND stauchwall, return largest piece."""
+        if poly is None or poly.is_empty:
+            return None
+        if sz_polygon is not None:
+            poly = poly.intersection(sz_polygon)
+        if sw_polygon is not None:
+            poly = poly.intersection(sw_polygon)
+        if poly.is_empty:
+            return None
+        # Intersection can produce GeometryCollection (mix of polygons,
+        # lines, points at boundaries). Extract only polygon geometries.
+        if poly.geom_type == 'GeometryCollection':
+            polys = [g for g in poly.geoms
+                     if g.geom_type in ('Polygon', 'MultiPolygon')]
+            if not polys:
+                return None
+            poly = unary_union(polys)
+        if poly.geom_type == 'MultiPolygon':
+            poly = max(poly.geoms, key=lambda p: p.area)
+        if poly.is_empty or poly.area < MIN_POLYGON_AREA:
+            return None
+        return poly
+
     # --- Primary: BFS propagation ---
     if use_propagation and not meloche_df.empty:
         polygon, failed = propagate_release(
@@ -306,15 +357,13 @@ def make_release_polygon_2d(
             snap_features      = snap_features,
         )
         if polygon is not None:
-            return polygon
+            polygon = _clip_polygon(polygon)
+            if polygon is not None:
+                return polygon
         print(f"  propagate_release returned None for cluster {trigger_cluster_id}"
               f" — falling back to rectangle")
 
     # --- Fallback: oriented rectangle ---
-    from shapely.geometry import Polygon, MultiPolygon
-    from shapely.ops import unary_union
-    import rasterio.features
-
     _, aspect_grid = compute_slope_aspect(dem)
     trig_px = np.argwhere(cluster_map == trigger_cluster_id)
     if len(trig_px) == 0:
@@ -345,22 +394,7 @@ def make_release_polygon_2d(
     if not polygon.is_valid:
         polygon = polygon.buffer(0)
 
-    if start_zone_mask is not None:
-        shapes = list(rasterio.features.shapes(
-            start_zone_mask.astype(np.uint8),
-            mask=start_zone_mask, transform=transform))
-        if shapes:
-            sz_union = unary_union(
-                [Polygon(s['coordinates'][0]) for s, v in shapes if v == 1])
-            polygon = polygon.intersection(sz_union)
-
-    if polygon.is_empty:
-        return None
-    if polygon.geom_type == 'MultiPolygon':
-        polygon = max(polygon.geoms, key=lambda p: p.area)
-    if polygon.area < MIN_POLYGON_AREA:
-        return None
-    return polygon
+    return _clip_polygon(polygon)
 
 
 
@@ -914,3 +948,4 @@ def plot_release_comparison(
         plt.close(fig)
     else:
         plt.show()
+        

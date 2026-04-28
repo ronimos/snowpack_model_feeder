@@ -262,10 +262,9 @@ def step_scenarios(cfg, args):
     start_zone_mask = kml_to_mask(cfg.start_zone_kml, dem.shape, transform)
 
     # --- Load pre-computed analysis outputs ---
-    # Prefer full start zone features (from --all-clusters) over group-level.
-    # Group-level CSVs only cover release/adjacent/reference clusters,
-    # which is insufficient for operational trigger selection across the
-    # entire start zone.
+    # The analyze step now produces full start zone features by default.
+    # Fall back to group-level CSVs for backward compatibility with
+    # older analysis outputs.
     feat_csv_all = cfg.analysis_dir / f"all_start_zone_features_{args.snapshot_date}.csv"
     feat_csv_grp = cfg.analysis_dir / f"release_zone_features_{args.snapshot_date}.csv"
     mel_csv_all  = cfg.analysis_dir / f"meloche_features_all_{args.snapshot_date}.csv"
@@ -276,7 +275,7 @@ def step_scenarios(cfg, args):
     elif feat_csv_grp.exists():
         feat_csv = feat_csv_grp
         print(f"  WARNING: using group-level features ({feat_csv_grp.name}). "
-              f"Run 'analyze --all-clusters' for full start zone coverage.")
+              f"Rerun 'analyze' step to generate full start zone coverage.")
     else:
         raise FileNotFoundError(
             f"Run 'analyze' step first — missing features CSV")
@@ -435,6 +434,82 @@ def step_scenarios(cfg, args):
                 A_ca = min(float(val), A_CA_MAX)
         a_ca_list.append(A_ca)
 
+        # Extract hand hardness at trigger cluster from SNOWPACK profile
+        hh_depth_m, hh_value = None, None
+        snap_ts = np.datetime64(f"{args.snapshot_date}T18:00")
+        locs = ds.coords['location'].values
+        # Match location name format: 'cluster_XXXX_cluster_XXXX' or 'cluster_XXXX'
+        t_loc = None
+        for loc in locs:
+            loc_str = str(loc)
+            cid_parsed = int(loc_str.split('_')[-1])
+            if cid_parsed == t_cid:
+                t_loc = loc_str
+                break
+
+        if t_loc is None:
+            print(f"    hand_hardness: trigger cid={t_cid} not found in Zarr locations")
+        else:
+            tidx = int(np.argmin(np.abs(ds.coords['time'].values - snap_ts)))
+            ds_t = ds.sel(location=t_loc).isel(time=tidx)
+            sq = [d for d in ['slope', 'realization'] if d in ds_t.dims]
+            if sq:
+                ds_t = ds_t.squeeze(sq)
+            if 'hand_hardness' not in ds_t:
+                print(f"    hand_hardness: variable not in Zarr dataset")
+                print(f"    Available vars: {list(ds_t.data_vars)[:15]}...")
+            else:
+                try:
+                    hh = ds_t['hand_hardness'].values
+                    hs_cm = float(ds_t['HS'].values)
+                    n_layers = len(hh)
+
+                    # SNOWPACK hand hardness uses negative values:
+                    #   -1=F, -2=4F, -3=1F, -4=P, -5=K, -6=I
+                    # More negative = harder. "> 1F" means hh <= -3.
+                    # Any non-NaN, non-zero value means HH is assigned.
+                    has_hh = ~np.isnan(hh) & (hh < 0)
+                    n_valid = int(np.sum(has_hh))
+                    print(f"    hand_hardness: {n_layers} layers, "
+                          f"{n_valid} with valid HH, HS={hs_cm:.1f}cm")
+
+                    # Find topmost layer harder than 1F (hh <= -3)
+                    harder_than_1f = has_hh & (hh <= -3)
+                    if not harder_than_1f.any():
+                        # Fall back to any assigned HH
+                        harder_than_1f = has_hh
+
+                    if harder_than_1f.any():
+                        idx = np.where(harder_than_1f)[0][-1]  # topmost
+                        hh_value = float(hh[idx])
+                        # Layer heights from ground — try 'height' (xsnow)
+                        # then 'z' as fallback
+                        z_var = None
+                        for zname in ('height', 'z', 'layer_height'):
+                            if zname in ds_t:
+                                z_var = zname
+                                break
+                        if z_var is not None:
+                            z = ds_t[z_var].values
+                            hh_depth_m = (hs_cm - float(z[idx])) / 100.0
+                            print(f"    → HH={hh_value:.1f} at "
+                                  f"depth={hh_depth_m:.2f}m from surface"
+                                  f" (layer {idx}, {z_var}={z[idx]:.1f}cm)")
+                        else:
+                            # Fallback: estimate depth from layer index
+                            hh_depth_m = None
+                            print(f"    hand_hardness: no height variable "
+                                  f"found ({list(ds_t.data_vars)[:10]}...)")
+                            print(f"    → HH={hh_value:.1f} at layer {idx}"
+                                  f" (depth unknown)")
+                    else:
+                        print(f"    hand_hardness: no layers with valid HH")
+                except Exception as e:
+                    print(f"    hand_hardness extraction failed for "
+                          f"cid={t_cid}: {e}")
+                    import traceback
+                    traceback.print_exc()
+
         for s_idx, size_f in enumerate(args.size_factors):
             for d_idx, d_pct in enumerate(args.depth_pcts):
 
@@ -506,6 +581,8 @@ def step_scenarios(cfg, args):
                     mu                 = args.mu,
                     xi                 = args.xi,
                     profile            = raster_profile,
+                    scour_depth_m = hh_depth_m,
+                    hand_hardness_value   = hh_value,
                 )
                 # Augment row with trigger rank and sk38
                 row['sk38_rank'] = t_rank + 1
@@ -603,9 +680,7 @@ def main():
     parser.add_argument('--max-layers', type=int, default=338)
 
     # analyze
-    parser.add_argument('--classifier', action='store_true',
-                        help='Use classifier-based features instead of regression-based. '
-                             'This will also generate the feature importance plot for the probabilistic boundary model. ')
+    parser.add_argument('--classifier', action='store_true')
     #parser.add_argument('--all-clusters', action='store_true',
     #                    help='Extract features for ALL start zone clusters. '
     #                         'Produces all_start_zone_features and '
