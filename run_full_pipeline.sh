@@ -7,8 +7,14 @@
 #
 # Usage:
 #   ./run_full_pipeline.sh                         # full pipeline, default dates
+#   ./run_full_pipeline.sh --clean                 # wipe SNOWPACK restart files first
 #   ./run_full_pipeline.sh --end-date 2026-03-31   # custom SNOWPACK end date
 #   ./run_full_pipeline.sh --snapshot 2026-01-17    # custom analysis snapshot
+#   ./run_full_pipeline.sh --clean --snapshot 2026-01-17  # clean + custom snapshot
+#
+# Flags:
+#   --clean      Remove SNOWPACK restart files (.sno, .pro) so simulation
+#                starts from bare ground. Required after a DEM change.
 #
 # Runtime: ~4-6 hours depending on cluster count and SNOWPACK season length.
 
@@ -16,19 +22,20 @@ set -euo pipefail
 
 # --- Configuration ---
 PROJECT_DIR=/home/ron/snowpack_model_feeder
-SNOWPACK_DIR=/home/ron/snowpack/little_prof
-PIPELINE="python $PROJECT_DIR/src/snowpack-model-feeder/pipeline.py"
+SNOWPACK_DIR=$PROJECT_DIR/snowpack/little_prof
+PIPELINE="python $PROJECT_DIR/src/snowpack-model-feeder/forcing_pipeline.py"
 ANALYSIS="python $PROJECT_DIR/src/snowpack-model-feeder/analysis_pipeline.py"
 VENV=$PROJECT_DIR/.venv/bin/activate
 LOG_DIR=$PROJECT_DIR/outputs/logs
-SNOWPACK_END="${1:---end-date}"
 SNAPSHOT_DATE=""
+CLEAN=0
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --end-date)   SNOWPACK_END="$2"; shift 2 ;;
         --snapshot)   SNAPSHOT_DATE="$2"; shift 2 ;;
+        --clean)      CLEAN=1; shift ;;
         *)            shift ;;
     esac
 done
@@ -75,6 +82,14 @@ echo ""
 
 # --- Phase 2: SNOWPACK simulation ---
 echo ">>> Phase 2: SNOWPACK simulation"
+
+if [[ $CLEAN -eq 1 ]]; then
+    echo "    --clean: removing restart files, .pro, and per-cluster .sno"
+    rm -f "$SNOWPACK_DIR"/output/*_res.sno
+    rm -f "$SNOWPACK_DIR"/output/*.pro
+    rm -f "$SNOWPACK_DIR"/input/snow/cluster_*.sno
+    echo "    Cleaned. SNOWPACK will start from template.sno."
+fi
 echo ""
 
 phase2_start=$SECONDS
@@ -122,4 +137,3 @@ echo "    SNOWPACK:      $SNOWPACK_DIR/output/"
 echo "    Scenarios:     $PROJECT_DIR/outputs/scenarios/"
 echo "    Log:           $LOGFILE"
 echo "============================================================"
-

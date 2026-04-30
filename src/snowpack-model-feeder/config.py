@@ -13,13 +13,27 @@ from typing import Optional
 class ProjectConfig:
     # --- Paths ---
     project_dir: Path = Path(".")
-    dem_path: Path = Path("data/dem/251110_Professor_Ground-DSM.tiff")
+    dem_path: Path = Path("data/dem/251126_Professor_PTC_DSM.tiff")
     survey_dir: Path = Path("data/surveys")
     weather_csv: Path = Path("data/weather/weather_data.csv")
     boundary_kml: Path = Path("data/boundaries/Little_Proff.kml")
     start_zone_kml: Path = Path("data/boundaries/Litte_prof_start_zone.kml")
     output_dir: Path = Path("outputs")
     windninja_library_dir: Path = Path("windninja/library")
+
+    # --- SNOWPACK paths ---
+    snowpack_dir: Path = Path("snowpack/little_prof")
+    release_geojson: Path = Path("data/boundaries/avalanche_release_area.geojson")
+
+    # --- Scenario defaults ---
+    default_snapshot: str = "2026-01-17"
+    n_triggers: int = 5
+    size_factors: list = field(default_factory=lambda: [0.70, 0.85, 1.00, 1.15, 1.30])
+    depth_percentiles: list = field(default_factory=lambda: [10, 50, 90])
+    depth_scales: dict = field(default_factory=lambda: {10: 0.75, 50: 1.00, 90: 1.30})
+    mu: float = 0.155           # Voellmy dry friction (uncalibrated default)
+    xi: float = 1500.0          # Voellmy turbulent friction m/s² (uncalibrated default)
+    stauchwall_deg: float = 28.0
 
     # --- Survey file pattern ---
     # Expected format: YYMMDD_*_snowHeight.tif
@@ -70,6 +84,8 @@ class ProjectConfig:
         self.start_zone_kml = self.project_dir / self.start_zone_kml
         self.output_dir = self.project_dir / self.output_dir
         self.windninja_library_dir = self.project_dir / self.windninja_library_dir
+        self.snowpack_dir = self.project_dir / self.snowpack_dir
+        self.release_geojson = self.project_dir / self.release_geojson
 
     @property
     def analysis_dir(self) -> Path:
@@ -92,9 +108,42 @@ class ProjectConfig:
     def resampled_dir(self) -> Path:
         return self.output_dir / "resampled_1m"
 
+    @property
+    def pro_dir(self) -> Path:
+        return self.snowpack_dir / "output"
+
+    @property
+    def zarr_path(self) -> Path:
+        return self.pro_dir / "slope_snowpack.zarr"
+
+    @property
+    def scenarios_dir(self) -> Path:
+        return self.output_dir / "scenarios"
+
+    @property
+    def models_dir(self) -> Path:
+        return self.output_dir / "models"
+
+    @property
+    def logs_dir(self) -> Path:
+        return self.output_dir / "logs"
+
+    @property
+    def dem_1m_path(self) -> Path:
+        return self.resampled_dir / "dem_1m.tif"
+
+    @property
+    def cluster_map_path(self) -> Path:
+        return self.analysis_dir / "cluster_map.npy"
+
+    @property
+    def cluster_map_tif_path(self) -> Path:
+        return self.analysis_dir / "cluster_map.tif"
+
     def ensure_dirs(self):
         """Create all output directories."""
-        for d in [self.output_dir, self.analysis_dir, self.plots_dir, self.smet_dir,
-                  self.grids_dir, self.resampled_dir]:
+        for d in [self.output_dir, self.analysis_dir, self.plots_dir,
+                  self.smet_dir, self.grids_dir, self.resampled_dir,
+                  self.scenarios_dir, self.models_dir, self.logs_dir]:
             d.mkdir(parents=True, exist_ok=True)
             

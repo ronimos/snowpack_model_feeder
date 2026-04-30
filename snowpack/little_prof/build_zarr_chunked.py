@@ -23,9 +23,9 @@ WORKERS    = 31
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--pro-dir',
-                        default='/home/ron/snowpack/little_prof/output')
+                        default='/home/ron/snowpack_model_feeder/snowpack/little_prof/output')
     parser.add_argument('--zarr-out',
-                        default='/home/ron/snowpack/little_prof/output/'
+                        default='/home/ron/snowpack_model_feeder/snowpack/little_prof/output/'
                                 'slope_snowpack.zarr')
     parser.add_argument('--batch-size', type=int, default=BATCH_SIZE)
     parser.add_argument('--workers',    type=int, default=WORKERS)

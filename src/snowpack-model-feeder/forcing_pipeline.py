@@ -13,16 +13,16 @@ Workflow:
   8. smet       - Write per-cluster SMET forcing files
 
 Usage:
-  python pipeline.py resample
-  python pipeline.py transport
-  python pipeline.py features
-  python pipeline.py train
-  python pipeline.py avalanche
-  python pipeline.py cluster
-  python pipeline.py gap_fill
-  python pipeline.py smet
-  python pipeline.py all          # run everything in order
-  python pipeline.py validate     # LOO-CV report only (after features, no model saved)
+  python forcing_pipeline.py resample
+  python forcing_pipeline.py transport
+  python forcing_pipeline.py features
+  python forcing_pipeline.py train
+  python forcing_pipeline.py avalanche
+  python forcing_pipeline.py cluster
+  python forcing_pipeline.py gap_fill
+  python forcing_pipeline.py smet
+  python forcing_pipeline.py all          # run everything in order
+  python forcing_pipeline.py validate     # LOO-CV report only (after features, no model saved)
 
 Each step saves intermediate results to outputs/, so you can
 restart from any step without recomputing previous ones.
@@ -891,7 +891,7 @@ def step_smet(cfg: ProjectConfig):
     # --- Augment with NWP refill ---
     refill_path = cfg.project_dir / "data" / "weather" / "refill.smet"
     if refill_path.exists():
-        from smet_writer import read_smet, augment_smet_with_refill
+        from smet_writer import read_smet, augment_smet_with_refill, fill_smet_gaps_from_refill
         print(f"\nAugmenting SMET files from {refill_path.name}...")
         refill_header, refill_df = read_smet(str(refill_path))
         added_fields = None
@@ -909,6 +909,20 @@ def step_smet(cfg: ProjectConfig):
                   f"{len(added_fields)} fields added: {', '.join(added_fields)}")
         else:
             print("  No new fields to add (all refill fields already present).")
+
+        # --- Fill temporal gaps from refill (e.g. Dec 18 station outage) ---
+        print(f"\nFilling SMET gaps from {refill_path.name} (max 48h)...")
+        total_inserted = total_filled = 0
+        for cid in representatives:
+            smet_file = smet_dir / f"cluster_{cid:04d}.smet"
+            if smet_file.exists():
+                result = fill_smet_gaps_from_refill(
+                    str(smet_file), refill_header, refill_df,
+                    max_gap_hours=48)
+                total_inserted += result['n_rows_inserted']
+                total_filled += result['n_rows_filled']
+        print(f"  Rows inserted: {total_inserted}, "
+              f"cells filled: {total_filled}")
     else:
         print(f"\nNo NWP refill SMET at {refill_path}, skipping augmentation.")
 

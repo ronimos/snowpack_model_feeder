@@ -12,7 +12,7 @@
 SNOWPACK_BIN=/home/caic/caic/rtsys/snowpack/exe/snowpack
 export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/home/caic/caic/rtsys/snowpack/src/snowpack/lib
 
-PROJECT_DIR=/home/ron/snowpack/little_prof
+PROJECT_DIR=/home/ron/snowpack_model_feeder/snowpack/little_prof
 SMET_DIR=/home/ron/snowpack_model_feeder/outputs/smet
 SNOW_IN_DIR=$PROJECT_DIR/input/snow
 OUTPUT_DIR=$PROJECT_DIR/output
@@ -155,5 +155,5 @@ fi
 
 echo ""
 echo "=== Aggregating results to Zarr ==="
-/home/ron/snowpack_model_feeder/.venv/bin/python3 /home/ron/snowpack/little_prof/build_zarr_chunked.py
+/home/ron/snowpack_model_feeder/.venv/bin/python3 /home/ron/snowpack_model_feeder/snowpack/little_prof/build_zarr_chunked.py
 echo "=== Zarr Build Complete ==="

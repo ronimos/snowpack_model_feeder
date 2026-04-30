@@ -1,12 +1,24 @@
-# Little Professor — UAS-Driven SNOWPACK Model Chain
+# Little Professor — UAS-Driven Avalanche Model Chain
 
 **From Snow Depth to Runout Probability: A UAS-Driven Model Chain for Highway Avalanche Operations**
 Ron, Ryan, Valerie, Snook et al.
 
 Demonstrated on the 18 January 2026 D2 skier-triggered slab avalanche at Little Professor,
-Loveland Pass (US-6). End-to-end pipeline: UAS snow depth survey → spatially distributed
-SNOWPACK → avalanche detection → snowpack structure analysis → crack arrest estimation
-(Meloche et al. 2025) → com1DFA runout probability maps.
+Loveland Pass (US-6), Colorado. End-to-end pipeline: UAS snow depth survey → spatially
+distributed SNOWPACK → release area geometry (Meloche et al. 2025) → com1DFA runout
+probability envelopes.
+
+---
+
+## Quick Start
+
+```bash
+# Full rebuild (new DEM, first setup, or major config change)
+./run_full_pipeline.sh
+
+# Operational update (after a new UAS survey)
+./run_operational.sh --snapshot 2026-01-17
+```
 
 ---
 
@@ -14,51 +26,73 @@ SNOWPACK → avalanche detection → snowpack structure analysis → crack arres
 
 ```
 src/snowpack-model-feeder/
-    pipeline.py               # Main pipeline orchestrator (run steps by name)
+    forcing_pipeline.py       # Forcing pipeline: UAS surveys → SMET files
+    analysis_pipeline.py      # Analysis pipeline: Zarr → release geometry → scenarios
     config.py                 # ProjectConfig dataclass — all paths and parameters
     spatial_model.py          # WindNinja transport model, RF gap-fill
     smet_writer.py            # SMET read/write, gap-fill logic
     clustering.py             # Cluster generation from DEM + transport features
     avalanche.py              # UAS dHS anomaly → release/deposit boundary detection
-    plots.py                  # Avalanche boundary plot functions
+    snowpack_analysis.py      # Profile feature extraction, Meloche parameters, groups
+    release_geometry.py       # BFS crack propagation, release polygon construction
+    probabilistic_release.py  # Probabilistic boundary model (logistic regression)
+    fit_boundary_model.py     # Train boundary model from observed events
+    scenario_writer.py        # Write AvaFrame com1DFA scenario input files
+    plots.py                  # Avalanche boundary + comparison plot functions
     visualize_snowpack.py     # Daily SNOWPACK frame generator + HTML flipbook
-    analyze_release_zone.py   # Release zone vs adjacent slope comparison,
-                              #   WL/slab decomposition, Meloche et al. (2025) features,
-                              #   RF classifier, cross-date test
+    analyze_release_zone.py   # Release zone vs adjacent slope comparison
+
+scripts/
+    animate_propagation.py        # BFS crack propagation animation
+    animate_instability_evolution.py  # Seasonal Sk38 + Λ evolution animation
+    cluster_map_viewer.py         # Interactive Folium cluster map
+    plot_cluster_sizes.py         # Cluster group comparison plots
+
+snowpack/
+    little_prof/
+        config/master_config.ini  # SNOWPACK configuration
+        config/template.sno       # Initial conditions template
+        run_snowpack.sh           # Run SNOWPACK on all clusters
+        build_zarr_chunked.py     # Aggregate .pro output to Zarr
+        output/                   # .pro files + Zarr (gitignored)
+
+windninja/
+    library/                  # 96-run WindNinja library (16 dir × 6 speeds, 1m)
+    generate_wind_library.sh  # Generate library from DEM
 
 data/
     boundaries/
         Little_Proff.kml                  # Survey domain boundary
-        Litte_prof_start_zone.kml         # Avalanche start zone (release candidates)
+        Litte_prof_start_zone.kml         # Avalanche start zone
         avalanche_release_area.geojson    # Observed Jan 18 release area
-
-windninja/
-    library/                  # 96-run WindNinja library (16 dir × 6 speeds, 1m resolution)
+    surveys/                              # Raw UAS GeoTIFFs
 
 outputs/
+    resampled_1m/             # 1m HS grids + DEM
     smet/                     # Per-cluster SMET forcing files
-    plots/                    # Avalanche boundary plots, comparison plots
-        daily_frames/         # Per-day SNOWPACK panel PNGs + index.html flipbook
-            loading/          # HS, dHS/dt
-            stability/        # Sk38, SSI, Sn38
-            propagation/      # TG, accumulated TG, stab deformation rate
-            structure/        # WL burial, slab thickness, WL shear strength, grain size
-    analysis/
-        cluster_map.npy               # Cluster ID raster (same grid as DEM)
-        release_zone_groups.json      # Cluster IDs per group (release/adjacent/reference)
-        meloche_features_YYYY-MM-DD.csv   # Per-cluster Meloche (2025) parameters
-        release_zone_features_YYYY-MM-DD.csv  # Per-cluster WL/slab feature table
+    analysis/                 # Cluster map, features, Meloche parameters
+    scenarios/                # AvaFrame scenario directories
+    models/                   # Trained boundary model (.pkl)
+    plots/                    # All generated figures + animations
+    logs/                     # Pipeline run logs
+
+run_full_pipeline.sh          # Full end-to-end rebuild
+run_operational.sh            # Operational update after new survey
 ```
 
 ---
 
-## Pipeline Steps
+## Pipeline Overview
 
-Run steps individually:
+The pipeline has three phases, orchestrated by two shell scripts:
+
+### Phase 1: Forcing generation (`forcing_pipeline.py`)
+
+Transforms UAS snow depth surveys + weather station data into per-cluster SMET
+forcing files for SNOWPACK.
 
 ```bash
-cd /home/ron/snowpack_model_feeder
-python src/snowpack-model-feeder/pipeline.py <step>
+python src/snowpack-model-feeder/forcing_pipeline.py <step>
 ```
 
 | Step | Description |
@@ -69,117 +103,162 @@ python src/snowpack-model-feeder/pipeline.py <step>
 | `train` | Train Random Forest spatial distribution model |
 | `avalanche` | Detect avalanche boundaries from dHS anomaly |
 | `cluster` | Generate cluster map from DEM + transport |
-| `gap_fill` | Fill missing survey periods (default: observed transport) |
+| `gap_fill` | Fill hourly HS between survey dates |
 | `smet` | Write per-cluster SMET forcing files |
 
 Gap-fill modes:
 
 ```bash
-python pipeline.py gap_fill                  # observed transport (default, r=0.83)
-python pipeline.py gap_fill --station-only   # station dHS only
-python pipeline.py gap_fill --use-model      # RF + WindNinja (r=0.10, not recommended)
+python src/snowpack-model-feeder/forcing_pipeline.py gap_fill              # observed transport (default, r=0.83)
+python src/snowpack-model-feeder/forcing_pipeline.py gap_fill --station-only  # station dHS only
+python src/snowpack-model-feeder/forcing_pipeline.py gap_fill --use-model     # RF + WindNinja (r=0.10, not recommended)
+```
+
+### Phase 2: SNOWPACK simulation
+
+```bash
+bash snowpack/little_prof/run_snowpack.sh
+```
+
+Runs SNOWPACK independently at each of ~6,636 cluster locations. On first run,
+uses template initial conditions; on reruns, restarts from `_res.sno` files
+(incremental simulation). Output `.pro` files are aggregated to a Zarr store
+by `build_zarr_chunked.py` (called automatically at end of `run_snowpack.sh`).
+
+### Phase 3: Analysis + scenarios (`analysis_pipeline.py`)
+
+Extracts snowpack features from the Zarr, generates release polygons, and
+writes AvaFrame scenario directories.
+
+```bash
+python src/snowpack-model-feeder/analysis_pipeline.py <step> [options]
+```
+
+| Step | Description |
+|------|-------------|
+| `analyze` | Extract Meloche features for all start zone clusters |
+| `scenarios` | Generate release polygons + depth rasters for com1DFA |
+
+Scenario generation:
+
+```bash
+# Single trigger, 5 size factors, 3 depth percentiles = 15 scenarios
+python src/snowpack-model-feeder/analysis_pipeline.py scenarios \
+    --snapshot-date 2026-01-17 --n-triggers 1 \
+    --size-factors 0.70 0.85 1.00 1.15 1.30 \
+    --depth-pcts 10 50 90
+
+# Multi-trigger ensemble = 75 scenarios
+python src/snowpack-model-feeder/analysis_pipeline.py scenarios \
+    --snapshot-date 2026-01-17 --n-triggers 5 \
+    --size-factors 0.70 0.85 1.00 1.15 1.30 \
+    --depth-pcts 10 50 90
+
+# Validation against observed release area
+python src/snowpack-model-feeder/analysis_pipeline.py scenarios \
+    --snapshot-date 2026-01-17 --n-triggers 1 \
+    --use-observed-release
 ```
 
 ---
 
-## SNOWPACK
+## Full vs Operational Pipeline
 
-SMET files are written to `outputs/smet/`. Run SNOWPACK:
-
-```bash
-cd /home/ron/snowpack/little_prof
-bash run_snowpack.sh           # Runs all 1989 clusters × slopes in parallel
-```
-
-Output `.pro` files: `/home/ron/snowpack/little_prof/output/cluster_XXXX_cluster_XXXX.pro`
-
-Build Zarr cache (one-time, ~2h, resumable):
-
-```bash
-nohup python build_zarr_chunked.py \
-    > /home/ron/snowpack/little_prof/build_zarr.log 2>&1 &
-```
+| | `run_full_pipeline.sh` | `run_operational.sh` |
+|---|---|---|
+| **When** | New DEM, first setup, config change | After a new UAS survey |
+| **Runs** | All forcing + SNOWPACK + analysis | resample → gap_fill → smet → SNOWPACK → analysis |
+| **Skips** | — | transport, features, train, avalanche, cluster |
+| **SNOWPACK** | Full season from bare ground | Incremental from restart files |
+| **Runtime** | ~4–6 hours | ~1–2 hours |
 
 ---
 
-## Avalanche Boundary Detection
+## Release Geometry
 
-```bash
-# Default parameters (Jan 14–20 period)
-python src/snowpack-model-feeder/avalanche.py
+Two complementary models generate release area polygons:
 
-# Custom period
-python src/snowpack-model-feeder/avalanche.py \
-    --date-before 2026-01-06 --date-after 2026-01-14
+**Physics-based BFS model** — deterministic flood-fill from a trigger cluster through
+the k=8 cluster neighbour graph. Arrest criteria: slab thickness discontinuity
+(THICKNESS_JUMP_FACTOR=0.25), elastic length discontinuity (LAMBDA_JUMP_FACTOR=0.5),
+stauchwall (slope < 28°), τ_g < 50 Pa, start zone boundary. Calibrated on 75% of
+the Jan 18 release boundary, verified on 25%.
 
-# Key tunable parameters
-#   --erosion-sigma 1.5    threshold for release zone seeds (default 1.5)
-#   --canny-low 0.05       Canny edge lower threshold (default 0.05)
-#   --canny-high 0.08      Canny edge upper threshold (default 0.08)
-#   --no-noise-mask        disable persistent noise mask
+**Probabilistic boundary model** — logistic regression trained on labeled cluster-pair
+transitions from observed events. Produces P(arrest) at each boundary. Improves with
+each new event. Currently trained on Jan 18 only (ROC-AUC 0.64).
+
+See `docs/release_area_geometry.md` for full method documentation.
+
+---
+
+## Scenario Ensemble
+
+The scenario ensemble spans three independent axes:
+
+| Axis | What it changes | CLI flag |
+|------|----------------|----------|
+| Trigger location | Where the crack nucleates (different Sk38, A_ca, position) | `--n-triggers` |
+| Size factor | How far the crack propagates (scales arrest thresholds) | `--size-factors` |
+| Depth percentile | How much snow in the release (scales depth raster) | `--depth-pcts` |
+
+Each scenario produces a release polygon + depth raster + params.json for com1DFA.
+Scenarios are probability-weighted (inverse Sk38 × log-normal size × P50-dominant depth).
+
+Output structure:
+
 ```
-
-Jan 18 detection result: release ~1100 m² / -600 m³, deposit ~3945 m² / 3121 m³.
+outputs/scenarios/YYYY-MM-DD/
+    metadata.json
+    trigger_locations.geojson
+    scenario_weights.json
+    summary.csv
+    scenarios/
+        scenario_001/
+            release.geojson       # EPSG:6342
+            depth.tif             # float32, NaN outside release
+            depth.asc + depth.prj # AvaFrame legacy format
+            density.json
+            params.json           # μ, ξ, scour_depth_m, scenario_probability
+```
 
 ---
 
 ## SNOWPACK Visualization
 
 ```bash
-# Fast test (simple WL split — bottom 20% of HS)
+# Fast test (simple WL split)
 python src/snowpack-model-feeder/visualize_snowpack.py --end-date 2026-01-20
 
-# Full season with proper grain-type WL detection (run overnight)
+# Full season with grain-type WL detection
 python src/snowpack-model-feeder/visualize_snowpack.py \
     --end-date 2026-03-31 --wl-method grain_type
 ```
 
-Opens `outputs/plots/daily_frames/index.html` — four-tab flipbook:
-- **Loading** — HS, dHS/dt
-- **Stability** — min Sk38, SSI, Sn38 at WL interface
-- **Propagation** — TG, accumulated TG, stab deformation rate
-- **Structure** — WL burial depth, slab thickness, WL shear strength, grain size, slab density
-
-All panels show start zone boundary (green) and Jan 18 release area (red).
-Keyboard: `←→` navigate, `space` play/pause, `1-4` switch tabs.
+Opens `outputs/plots/daily_frames/index.html` — four-tab flipbook (loading,
+stability, propagation, structure). Keyboard: `←→` navigate, `space` play/pause,
+`1-4` switch tabs.
 
 ---
 
-## Release Zone Analysis (Meloche et al. 2025)
-
-Compares snowpack properties between: (1) release zone clusters, (2) adjacent
-slope clusters within start zone, (3) terrain-matched reference clusters.
+## Animations
 
 ```bash
-# Box plot comparison at Jan 17 snapshot
-python src/snowpack-model-feeder/analyze_release_zone.py
+# BFS crack propagation from trigger cluster
+python scripts/animate_propagation.py \
+    --snapshot-date 2026-01-17 --trigger-cid 3178
 
-# With RF classifier (per-cluster feature importance)
-python src/snowpack-model-feeder/analyze_release_zone.py --classifier
+# Seasonal instability evolution (Sk38 + Λ)
+python scripts/animate_instability_evolution.py --end-date 2026-01-17
 
-# With cross-date test (train on Jan 17, score across season)
-python src/snowpack-model-feeder/analyze_release_zone.py \
-    --classifier --cross-date-test
-
-# Different snapshot date
-python src/snowpack-model-feeder/analyze_release_zone.py \
-    --snapshot-date 2026-01-14 --classifier
+# Interactive cluster map (HTML)
+python scripts/cluster_map_viewer.py \
+    --cluster-map outputs/analysis/cluster_map.tif
 ```
-
-**Jan 17 results (key findings):**
-- Release zone has lower WL shear strength gradient θ (~20 Pa/m vs ~28 Pa/m adjacent)
-  — more spatially homogeneous weak layer → crack propagates further
-- Release zone has higher driving stress τ_g — steeper, thicker slab
-- Dimensionless numbers Π₁, Π₂ higher in release zone → longer predicted crack arrest
-  distance, consistent with observed D2 size
-- θ values match Meloche et al. (2024) field-measured range (15–30 Pa/m) — independent
-  validation of distributed SNOWPACK spatial variability
-
-Output files saved to `outputs/analysis/` and `outputs/plots/`.
 
 ---
 
-## Key Parameters (Meloche et al. 2025 Framework)
+## Key Parameters
 
 | Parameter | Symbol | Source | Typical range |
 |-----------|--------|--------|---------------|
@@ -187,47 +266,42 @@ Output files saved to `outputs/analysis/` and `outputs/plots/`.
 | WL shear strength gradient | θ | neighbor cluster pairs | 10–50 Pa/m |
 | Slab elastic modulus | E | (ρ/300)^2.5 × 4 MPa | 2–6 MPa |
 | Slab tensile strength | σ_t | (ρ/300)^1.4 × 5 kPa | 3–7 kPa |
-| Characteristic elastic length | Λ | sqrt(E'·h·D_wl/G_wl) | 2–5 m |
+| Elastic length | Λ | √(E'·h·D_wl/G_wl) | 2–5 m |
 | Gravitational shear stress | τ_g | ρ·g·h·sinψ·(1−tanϕ/tanψ) | 200–600 Pa |
-| Elastic dimensionless number | Π₁ | τ_g/(θ·Λ·√(1+δ)) | 1–10 |
-| Brittle dimensionless number | Π₂ | Π₁·√(σ_t/τ_g) | 3–30 |
-| Crack arrest length (brittle) | A_ca | L_t·Π₁·√(σ_t/τ_g) | 50–500 m |
+| Crack arrest length | A_ca | L_t·Π₁·√(σ_t/τ_g) | 50–500 m |
+| Voellmy dry friction | μ | **uncalibrated default** | 0.155 |
+| Voellmy turbulent friction | ξ | **uncalibrated default** | 1500 m/s² |
 
-Fixed parameters: G_wl = 0.2 MPa (Reiweger et al. 2010), δ = 1, ν = 0.3, ϕ = 27°.
+Fixed parameters: G_wl = 0.2 MPa, δ = 1, ν = 0.3, ϕ = 27°.
 
 ---
 
 ## Dependencies
 
 ```bash
-# Main environment
+# Python environment (uv)
 cd /home/ron/snowpack_model_feeder
 source .venv/bin/activate
 
-# WindNinja
+# WindNinja (conda — separate environment)
 conda activate windninja
-WindNinja_cli --help
 
 # SNOWPACK binary
 /home/caic/caic/rtsys/snowpack/exe/snowpack
 ```
 
 Python packages: xsnow, xarray, numpy, pandas, rasterio, pyproj, scikit-learn,
-shapely, scipy, matplotlib, dask, zarr.
+shapely, scipy, matplotlib, dask, zarr, folium.
 
 ---
 
-## Data Locations
+## Documentation
 
-| Dataset | Path |
-|---------|------|
-| UAS surveys (resampled) | `outputs/resampled_1m/hs_YYYY-MM-DD.npy` |
-| DEM (1m) | `outputs/resampled_1m/dem_1m.tif` |
-| SMET forcing files | `outputs/smet/cluster_XXXX_cluster_XXXX.smet` |
-| SNOWPACK .pro output | `/home/ron/snowpack/little_prof/output/` |
-| Zarr cache | `/home/ron/snowpack/little_prof/output/slope_snowpack.zarr` |
-| WindNinja library | `windninja/library/` |
-| Cluster map | `outputs/analysis/cluster_map.npy` |
+| Document | Description |
+|----------|-------------|
+| `docs/release_area_geometry.md` | Release area method: BFS model, probabilistic model, validation |
+| `docs/clustering_methods.md` | Clustering algorithm, quality metrics, group comparison |
+| `docs/TODO.md` | Prioritized task list |
 
 ---
 
@@ -236,6 +310,9 @@ shapely, scipy, matplotlib, dask, zarr.
 - Meloche et al. (2025). Modeling Crack Arrest in Snow Slab Avalanches — Toward
   Estimating Avalanche Release Sizes. *JGR Earth Surface*, 130, e2025JF008470.
   doi:10.1029/2025JF008470
+- Gaume et al. (2015). Influence of weak layer heterogeneity and slab properties
+  on slab tensile failure propensity and avalanche release area.
+  *The Cryosphere*, 9, 795–804. doi:10.5194/tc-9-795-2015
 - Guillet et al. (2023). A Depth-Averaged Material Point Method for Shallow
   Landslides: Applications to Snow Slab Avalanche Release. *JGR Earth Surface*.
 - van Herwijnen et al. (2016). Estimating the effective elastic modulus and
@@ -243,4 +320,5 @@ shapely, scipy, matplotlib, dask, zarr.
   *Journal of Glaciology*, 62(236).
 - Reiweger et al. (2010). Load-controlled test apparatus for snow.
   *Cold Regions Science and Technology*, 62(2-3).
-  
+- Perzl (2007). Stauchwall threshold. JRC report.
+- Veitinger et al. (2016). Stauchwall / start zone delineation.

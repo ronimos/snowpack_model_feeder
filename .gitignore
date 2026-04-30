@@ -31,12 +31,19 @@ scripts/
 
 # Data files (if not needed for version control)
 data/
+snowpack/output/
+snowpack/little_prof/windninja/
+snowpack/little_prof/output/
+snowpack/little_prof/input/
 results/
 outputs/
 config.json
 *.tif*
 *.csv
 *.smet
+*.sno
+*.pro
+*.zarr
 
 # External models and checkpoints
 models/

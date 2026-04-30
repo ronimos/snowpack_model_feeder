@@ -58,20 +58,10 @@ from scenario_writer import (
 )
 
 # ---------------------------------------------------------------------------
-# Defaults
+# Defaults — path and parameter defaults are in config.py.
+# Only the snapshot date stays here (event-specific CLI default).
 # ---------------------------------------------------------------------------
-DEFAULT_PRO_DIR   = Path("/home/ron/snowpack/little_prof/output")
-DEFAULT_ZARR_PATH = DEFAULT_PRO_DIR / "slope_snowpack.zarr"
-DEFAULT_SNAPSHOT  = "2026-01-17"
-
-# Scenario ensemble axes
-DEFAULT_N_TRIGGERS     = 5
-DEFAULT_SIZE_FACTORS   = [0.70, 0.85, 1.00, 1.15, 1.30]  # P10–P90
-DEFAULT_DEPTH_PCTS     = [10, 50, 90]
-DEFAULT_DEPTH_SCALES   = {10: 0.75, 50: 1.00, 90: 1.30}   # HS multiplier
-DEFAULT_MU             = 0.155    # Voellmy dry friction
-DEFAULT_XI             = 1500.0   # Voellmy turbulent friction (m/s²)
-DEFAULT_STAUCHWALL_DEG = 28.0
+DEFAULT_SNAPSHOT = "2026-01-17"
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +92,7 @@ def _load_groups(cfg, dem, transform):
     from snowpack_analysis import geojson_to_mask
     cluster_map = np.load(str(cfg.analysis_dir / "cluster_map.npy"))
 
-    gj_path = cfg.project_dir / "data/boundaries/avalanche_release_area.geojson"
+    gj_path = cfg.release_geojson
     release_mask    = geojson_to_mask(gj_path, dem.shape, transform)
     start_zone_mask = kml_to_mask(cfg.start_zone_kml, dem.shape, transform)
     domain_mask     = ~np.isnan(dem)
@@ -161,7 +151,7 @@ def _load_observed_release_polygon(cfg):
     from shapely.ops import unary_union
     from pyproj import Transformer
 
-    gj_path = cfg.project_dir / "data/boundaries/avalanche_release_area.geojson"
+    gj_path = cfg.release_geojson
     if not gj_path.exists():
         raise FileNotFoundError(f"Observed release GeoJSON not found: {gj_path}")
 
@@ -341,7 +331,7 @@ def step_scenarios(cfg, args):
     # Optional: restrict to observed release area (validation mode only)
     if args.restrict_to_release_area:
         from snowpack_analysis import geojson_to_mask
-        gj_path = cfg.project_dir / 'data/boundaries/avalanche_release_area.geojson'
+        gj_path = cfg.release_geojson
         if gj_path.exists():
             release_area_mask = geojson_to_mask(gj_path, dem.shape, transform)
             candidate_ids = [
@@ -392,7 +382,8 @@ def step_scenarios(cfg, args):
         out_dir / "trigger_locations.geojson")
 
     # --- Slab depth grid for snapshot ---
-    full_depth = depth_from_snowpack(cluster_map, ds, args.snapshot_date)
+    full_depth = depth_from_snowpack(cluster_map, ds, args.snapshot_date,
+                                     snap_features=snap_features)
 
     # --- Scenario density (release zone median from features) ---
     rel_df       = snap_features[snap_features.index.isin(groups.get('release', set()))]
@@ -466,15 +457,15 @@ def step_scenarios(cfg, args):
 
                     # SNOWPACK hand hardness uses negative values:
                     #   -1=F, -2=4F, -3=1F, -4=P, -5=K, -6=I
-                    # More negative = harder. "> 1F" means hh <= -3.
+                    # More negative = harder. "> 1F" means hh < -3.
                     # Any non-NaN, non-zero value means HH is assigned.
                     has_hh = ~np.isnan(hh) & (hh < 0)
                     n_valid = int(np.sum(has_hh))
                     print(f"    hand_hardness: {n_layers} layers, "
                           f"{n_valid} with valid HH, HS={hs_cm:.1f}cm")
 
-                    # Find topmost layer harder than 1F (hh <= -3)
-                    harder_than_1f = has_hh & (hh <= -3)
+                    # Find topmost layer harder than 1F (hh < -3)
+                    harder_than_1f = has_hh & (hh < -3)
                     if not harder_than_1f.any():
                         # Fall back to any assigned HH
                         harder_than_1f = has_hh
@@ -545,7 +536,7 @@ def step_scenarios(cfg, args):
                     continue
 
                 # Scale depth by percentile
-                depth_scale  = DEFAULT_DEPTH_SCALES.get(d_pct, 1.0)
+                depth_scale  = cfg.depth_scales.get(d_pct, 1.0)
                 scaled_depth = full_depth * depth_scale
                 release_depth = rasterize_release_polygon(
                     polygon, scaled_depth, dem.shape, transform)
@@ -581,7 +572,7 @@ def step_scenarios(cfg, args):
                     mu                 = args.mu,
                     xi                 = args.xi,
                     profile            = raster_profile,
-                    scour_depth_m = hh_depth_m,
+                    scour_depth_m      = hh_depth_m,
                     hand_hardness_value   = hh_value,
                 )
                 # Augment row with trigger rank and sk38
@@ -669,8 +660,8 @@ def main():
 
     # Common
     parser.add_argument('--project-dir', type=Path, default=Path('.'))
-    parser.add_argument('--pro-dir',     type=Path, default=DEFAULT_PRO_DIR)
-    parser.add_argument('--zarr-path',   type=Path, default=DEFAULT_ZARR_PATH)
+    parser.add_argument('--pro-dir',     type=Path, default=None)
+    parser.add_argument('--zarr-path',   type=Path, default=None)
     parser.add_argument('--snapshot-date', default=DEFAULT_SNAPSHOT,
                         help='SNOWPACK snapshot date YYYY-MM-DD')
 
@@ -688,19 +679,18 @@ def main():
     #                         'probabilistic boundary model.')
 
     # scenarios
-    parser.add_argument('--n-triggers',    type=int,   default=DEFAULT_N_TRIGGERS)
+    parser.add_argument('--n-triggers',    type=int,   default=None)
     parser.add_argument('--size-factors',  type=float, nargs='+',
-                        default=DEFAULT_SIZE_FACTORS,
-                        help='Pi1 threshold multipliers. '
-                             '>1.0 = stricter = smaller release; '
-                             '<1.0 = looser = larger release; '
-                             '1.0 = baseline (all terrain as '
-                             'unstable as trigger cluster).')
+                        default=None,
+                        help='Size factor multipliers for arrest thresholds. '
+                             '>1.0 = relaxed = larger release; '
+                             '<1.0 = tighter = smaller release; '
+                             '1.0 = baseline.')
     parser.add_argument('--depth-pcts',    type=int,   nargs='+',
-                        default=DEFAULT_DEPTH_PCTS)
-    parser.add_argument('--mu',            type=float, default=DEFAULT_MU)
-    parser.add_argument('--xi',            type=float, default=DEFAULT_XI)
-    parser.add_argument('--stauchwall-deg',type=float, default=DEFAULT_STAUCHWALL_DEG)
+                        default=None)
+    parser.add_argument('--mu',            type=float, default=None)
+    parser.add_argument('--xi',            type=float, default=None)
+    parser.add_argument('--stauchwall-deg',type=float, default=None)
     parser.add_argument('--mode3-scale',   type=float, default=1.5,
                         help='Lateral arrest multiplier on trigger Pi1 '
                              '(default 1.5, must be > 1.0). Higher = '
@@ -724,6 +714,24 @@ def main():
     args = parser.parse_args()
     cfg  = ProjectConfig(project_dir=args.project_dir)
     cfg.ensure_dirs()
+
+    # Fill None args from config defaults
+    if args.pro_dir is None:
+        args.pro_dir = cfg.pro_dir
+    if args.zarr_path is None:
+        args.zarr_path = cfg.zarr_path
+    if args.n_triggers is None:
+        args.n_triggers = cfg.n_triggers
+    if args.size_factors is None:
+        args.size_factors = cfg.size_factors
+    if args.depth_pcts is None:
+        args.depth_pcts = cfg.depth_percentiles
+    if args.mu is None:
+        args.mu = cfg.mu
+    if args.xi is None:
+        args.xi = cfg.xi
+    if args.stauchwall_deg is None:
+        args.stauchwall_deg = cfg.stauchwall_deg
 
     if args.step in ('zarr_build', 'all'):
         step_zarr_build(cfg, args)

@@ -753,17 +753,24 @@ def propagate_release(
 def depth_from_snowpack(cluster_map: np.ndarray,
                         ds: xr.Dataset,
                         snapshot: str,
+                        snap_features: pd.DataFrame = None,
                         wl_fraction: float = 0.80) -> np.ndarray:
     """
-    Per-pixel slab depth (m) from SNOWPACK HS at snapshot date.
+    Per-pixel slab depth (m) from SNOWPACK at snapshot date.
+
+    If snap_features is provided and contains 'slab_thickness', uses the
+    per-cluster slab thickness above the WL interface (the mass that
+    actually releases). Falls back to wl_fraction × HS when slab_thickness
+    is unavailable for a cluster.
 
     Parameters
     ----------
-    cluster_map  : 2D array of cluster IDs
-    ds           : xsnow Dataset (Zarr-backed)
-    snapshot     : date string 'YYYY-MM-DD'
-    wl_fraction  : fraction of HS assumed to be slab (default 0.80)
-                   WL occupies the bottom (1 - wl_fraction)
+    cluster_map   : 2D array of cluster IDs
+    ds            : xsnow Dataset (Zarr-backed)
+    snapshot      : date string 'YYYY-MM-DD'
+    snap_features : DataFrame indexed by cluster_id with 'slab_thickness' (m)
+                    from profile_features(). If None, uses wl_fraction × HS.
+    wl_fraction   : fallback fraction of HS assumed to be slab (default 0.80)
 
     Returns
     -------
@@ -783,10 +790,39 @@ def depth_from_snowpack(cluster_map: np.ndarray,
     loc_ids = np.array([int(str(l).split('_')[-1]) for l in locs])
     id_to_hs = dict(zip(loc_ids, hs))
 
+    # Build per-cluster slab thickness lookup
+    use_slab_thickness = (snap_features is not None
+                          and 'slab_thickness' in snap_features.columns)
+    n_from_features = 0
+    n_from_fallback = 0
+
     depth_m = np.full(cluster_map.shape, np.nan, dtype=np.float32)
     for cid, h in id_to_hs.items():
-        if not np.isnan(h):
-            depth_m[cluster_map == cid] = h * wl_fraction / 100.0  # cm→m
+        if np.isnan(h):
+            continue
+
+        slab_depth_m = None
+        if use_slab_thickness and cid in snap_features.index:
+            st = snap_features.loc[cid, 'slab_thickness']
+            if isinstance(st, pd.Series):
+                st = st.iloc[0]
+            try:
+                st = float(st)
+                if not np.isnan(st) and st > 0:
+                    slab_depth_m = st  # already in metres
+                    n_from_features += 1
+            except (ValueError, TypeError):
+                pass
+
+        if slab_depth_m is None:
+            slab_depth_m = h * wl_fraction / 100.0  # cm → m
+            n_from_fallback += 1
+
+        depth_m[cluster_map == cid] = slab_depth_m
+
+    if use_slab_thickness:
+        print(f"  Depth raster: {n_from_features} clusters from slab_thickness, "
+              f"{n_from_fallback} from HS×{wl_fraction} fallback")
 
     return depth_m
 

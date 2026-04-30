@@ -135,7 +135,7 @@ def write_scenario(scenario_dir: Path,
                    mu: float = 0.155,
                    xi: float = 1500.0,
                    profile: Optional[dict] = None,
-                   hand_hardness_depth_m: Optional[float] = None,
+                   scour_depth_m: Optional[float] = None,
                    hand_hardness_value: Optional[float] = None) -> dict:
     """
     Write one scenario directory with all AvaFrame com1DFA inputs.
@@ -159,7 +159,7 @@ def write_scenario(scenario_dir: Path,
     weight              : scenario probability weight
     mu, xi              : Voellmy friction parameters
     profile             : rasterio profile dict (if None, built from args)
-    hand_hardness_depth_m : depth (m) to first layer with hand hardness at
+    scour_depth_m : depth (m) to first layer with hand hardness at
                            trigger cluster (from SNOWPACK profile). None if
                            not available.
     hand_hardness_value : hand hardness index at that layer (SNOWPACK scale).
@@ -264,8 +264,8 @@ def write_scenario(scenario_dir: Path,
                  'Calibrate mu/xi against Jan 18 observation before '
                  'using for operational hazard mapping.'),
     }
-    if hand_hardness_depth_m is not None:
-        params['hand_hardness_depth_m'] = round(float(hand_hardness_depth_m), 3)
+    if scour_depth_m is not None:
+        params['scour_depth_m'] = round(float(scour_depth_m), 3)
     if hand_hardness_value is not None:
         params['hand_hardness_value'] = round(float(hand_hardness_value), 2)
 
@@ -282,8 +282,8 @@ def write_scenario(scenario_dir: Path,
         'total_volume_m3':  round(total_vol, 1),
         'weight':           round(float(weight), 6),
     }
-    if hand_hardness_depth_m is not None:
-        row['hand_hardness_depth_m'] = round(float(hand_hardness_depth_m), 3)
+    if scour_depth_m is not None:
+        row['scour_depth_m'] = round(float(scour_depth_m), 3)
     if hand_hardness_value is not None:
         row['hand_hardness_value'] = round(float(hand_hardness_value), 2)
 
@@ -323,7 +323,7 @@ def write_summary_csv(rows: list[dict], out_path: Path) -> None:
         'scenario_id', 'trigger_cluster', 'A_ca_m', 'size_factor',
         'depth_percentile', 'release_area_m2', 'mean_depth_m',
         'total_volume_m3', 'weight',
-        'hand_hardness_depth_m', 'hand_hardness_value',
+        'scour_depth_m', 'hand_hardness_value',
     ]
     for col in col_order:
         if col not in df.columns:

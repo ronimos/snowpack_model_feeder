@@ -2,7 +2,7 @@
 # One-time setup for Little Professor SNOWPACK project.
 # Run from anywhere; paths are absolute.
 
-PROJECT_DIR=/home/ron/snowpack/little_prof
+PROJECT_DIR=/home/ron/snowpack_model_feeder/snowpack/little_prof
 
 mkdir -p "$PROJECT_DIR/config"
 mkdir -p "$PROJECT_DIR/input/snow"
