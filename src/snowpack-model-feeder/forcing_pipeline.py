@@ -928,6 +928,48 @@ def step_smet(cfg: ProjectConfig):
 
 
 # =====================================================================
+# Step: reinit — Post-avalanche SNOWPACK reinitialization
+# =====================================================================
+
+def step_reinit(cfg: ProjectConfig):
+    """
+    Scour release cluster .sno files after a detected avalanche event.
+
+    Uses min-kernel detection on the UAS dHS field to identify the release
+    area, then removes slab layers from .sno restart files.
+
+    Requires:
+      - Resampled surveys (hs_YYYY-MM-DD.npy) bracketing the event
+      - SNOWPACK .sno restart files (from a completed simulation)
+      - Slab thickness features (from analysis_pipeline.py analyze)
+
+    CLI args (via argparse in main):
+      --event-date, --date-before, --date-after, --snapshot-date
+      --kernel-size, --threshold-sigma-reinit
+      --release-geojson (optional, bypasses auto-detection)
+      --reinit-dry-run
+    """
+    from reinitialize_snowpack import run_reinit
+
+    # These are set in the argparse section below
+    args = cfg._reinit_args
+
+    run_reinit(
+        cfg=cfg,
+        date_before=args.date_before,
+        date_after=args.date_after,
+        event_date=args.event_date,
+        event_time=getattr(args, 'event_time', '12:00:00'),
+        snapshot_date=args.snapshot_date,
+        release_geojson=getattr(args, 'release_geojson', None),
+        kernel_size=getattr(args, 'kernel_size_reinit', 7),
+        threshold_sigma=getattr(args, 'threshold_sigma_reinit', 1.2),
+        dry_run=getattr(args, 'reinit_dry_run', False),
+        no_backup=getattr(args, 'reinit_no_backup', False),
+    )
+
+
+# =====================================================================
 # CLI
 # =====================================================================
 
@@ -940,12 +982,14 @@ STEPS = {
     'cluster':   step_cluster,
     'gap_fill':  step_gap_fill,
     'smet':      step_smet,
+    'reinit':    step_reinit,
 }
 
 # Canonical execution order.
 # Note: 'cluster' only requires 'resample' and can run before 'gap_fill',
 # but is placed here so that the domain mask is available during QA review
 # of gap-fill results before writing SMET files.
+# 'reinit' is not in ALL_STEPS — it's event-driven, not part of routine runs.
 ALL_STEPS = ['resample', 'transport', 'features', 'train', 'avalanche',
              'cluster', 'gap_fill', 'smet']
 
@@ -965,6 +1009,30 @@ def main():
                         help="Gap-fill using RF model for transport (default: observed transport)")
     parser.add_argument('--station-only', action='store_true',
                         help="Gap-fill using station dHS only — no spatial transport")
+
+    # reinit step arguments
+    parser.add_argument('--event-date', default='2026-01-18',
+                        help="Avalanche event date YYYY-MM-DD (reinit step)")
+    parser.add_argument('--event-time', default='12:00:00',
+                        help="Event time UTC HH:MM:SS (reinit step)")
+    parser.add_argument('--date-before', default='2026-01-14',
+                        help="Pre-event survey date (reinit step)")
+    parser.add_argument('--date-after', default='2026-01-20',
+                        help="Post-event survey date (reinit step)")
+    parser.add_argument('--snapshot-date', default='2026-01-17',
+                        help="SNOWPACK snapshot for slab thickness (reinit step)")
+    parser.add_argument('--release-geojson', default=None,
+                        help="Pre-drawn release GeoJSON (reinit step, "
+                             "bypasses auto-detection)")
+    parser.add_argument('--kernel-size-reinit', type=int, default=7,
+                        help="Min-kernel filter size (reinit step)")
+    parser.add_argument('--threshold-sigma-reinit', type=float, default=1.2,
+                        help="Min-kernel threshold sigma (reinit step)")
+    parser.add_argument('--reinit-dry-run', action='store_true',
+                        help="Show what reinit would do without writing")
+    parser.add_argument('--reinit-no-backup', action='store_true',
+                        help="Skip .sno.bak backup files (reinit step)")
+
     args = parser.parse_args()
 
     cfg = ProjectConfig(project_dir=Path(args.project_dir))
@@ -984,6 +1052,10 @@ def main():
     elif args.step == 'gap_fill':
         step_gap_fill(cfg, use_model=args.use_model,
                       station_only=args.station_only)
+    elif args.step == 'reinit':
+        # Stash args on cfg for step_reinit to access
+        cfg._reinit_args = args
+        step_reinit(cfg)
     else:
         STEPS[args.step](cfg)
 

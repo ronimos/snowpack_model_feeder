@@ -600,6 +600,192 @@ def detect_boundaries(hs_before: np.ndarray,
     }
 
 
+# =====================================================================
+# Min-kernel boundary detection (alternative to Canny+watershed)
+# =====================================================================
+
+def detect_minkernel(hs_before: np.ndarray,
+                     hs_after: np.ndarray,
+                     dem: np.ndarray,
+                     stn_dhs: float,
+                     kernel_size: int = 7,
+                     threshold_sigma: float = 1.2,
+                     min_area_m2: float = 200.0,
+                     min_slope_deg: float = 20.0,
+                     max_deposit_slope_deg: float = 25.0,
+                     smooth_size: int = 3,
+                     persistent_noise_mask: np.ndarray = None,
+                     start_zone_mask: np.ndarray = None,
+                     domain_mask: np.ndarray = None,
+                     transform=None) -> dict:
+    """
+    Detect avalanche release and deposit zones using min/max kernel filters.
+
+    Simpler and more robust than Canny+watershed — only 3 tunable parameters.
+    The minimum filter replaces each cell with the minimum dHS in its
+    neighborhood: connected erosion zones are preserved, isolated noise
+    is suppressed.
+
+    Parameters
+    ----------
+    kernel_size      : min/max filter window size in pixels (default 7).
+    threshold_sigma  : std devs below mean anomaly for release threshold
+                       (default 1.2).
+    min_area_m2      : minimum region area to keep.
+    min_slope_deg    : minimum slope for release zone.
+    max_deposit_slope_deg : maximum slope for deposit zone.
+    smooth_size      : pre-smoothing kernel size for dHS.
+    persistent_noise_mask : True where cells are chronic noise (excluded).
+    start_zone_mask  : True where release is physically possible.
+    domain_mask      : True where data is valid (overrides NaN check).
+    transform        : rasterio Affine (for contour generation).
+
+    Returns
+    -------
+    dict matching detect_boundaries() output format:
+        release_mask, deposit_mask, dhs_anomaly,
+        release_area_m2, deposit_area_m2,
+        release_volume_m3, deposit_volume_m3,
+        release_contours, deposit_contours,
+        start_zone_mask, params
+    """
+    from scipy.ndimage import (minimum_filter, maximum_filter,
+                               binary_fill_holes, binary_dilation,
+                               binary_erosion)
+    from skimage.measure import find_contours
+
+    valid = ~np.isnan(dem) & ~np.isnan(hs_before) & ~np.isnan(hs_after)
+    if domain_mask is not None:
+        valid = valid & domain_mask
+
+    # Terrain slope
+    fill_dem = np.where(np.isnan(dem), np.nanmean(dem), dem)
+    dy, dx = np.gradient(fill_dem, 1.0)
+    slope = np.degrees(np.arctan(np.sqrt(dx**2 + dy**2)))
+
+    # dHS anomaly
+    dhs = np.where(valid, hs_after - hs_before, np.nan)
+    dhs_anomaly = np.where(valid, dhs - stn_dhs, np.nan)
+
+    # Pre-smooth then apply min/max filters
+    dhs_fill = np.where(np.isnan(dhs_anomaly), 0, dhs_anomaly)
+    dhs_smooth = uniform_filter(dhs_fill, size=smooth_size)
+    dhs_minfiltered = minimum_filter(dhs_smooth, size=kernel_size)
+    dhs_maxfiltered = maximum_filter(dhs_smooth, size=kernel_size)
+
+    # Threshold statistics
+    if start_zone_mask is not None:
+        ref_vals = dhs_anomaly[valid & start_zone_mask]
+    else:
+        ref_vals = dhs_anomaly[valid]
+
+    if len(ref_vals) == 0:
+        return _empty_minkernel_result(dem.shape, dhs_anomaly,
+                                       start_zone_mask)
+
+    anom_mean = float(np.nanmean(ref_vals))
+    anom_std = float(np.nanstd(ref_vals))
+    release_threshold = anom_mean - threshold_sigma * anom_std
+    deposit_threshold = anom_mean + threshold_sigma * anom_std
+
+    print(f"  Min-kernel stats: mean={anom_mean:.3f}m  std={anom_std:.3f}m")
+    print(f"  Release threshold: {release_threshold:.3f}m  "
+          f"Deposit threshold: {deposit_threshold:.3f}m")
+
+    # --- Release zone ---
+    release_candidates = (
+        valid &
+        (dhs_minfiltered < release_threshold) &
+        (slope >= min_slope_deg)
+    )
+    if start_zone_mask is not None:
+        release_candidates = release_candidates & start_zone_mask
+    if persistent_noise_mask is not None:
+        release_candidates = release_candidates & ~persistent_noise_mask
+
+    release_candidates = binary_fill_holes(release_candidates)
+    release_candidates = binary_erosion(release_candidates, iterations=1)
+    release_candidates = binary_dilation(release_candidates, iterations=1)
+
+    release_labeled, n_release = connected_components(release_candidates)
+    release_mask = np.zeros(dem.shape, dtype=bool)
+    for rid in range(1, n_release + 1):
+        region = release_labeled == rid
+        if int(region.sum()) >= min_area_m2:
+            release_mask |= region
+
+    # --- Deposit zone ---
+    deposit_candidates = (
+        valid &
+        (dhs_maxfiltered > deposit_threshold) &
+        (slope <= max_deposit_slope_deg) &
+        ~release_mask
+    )
+    if persistent_noise_mask is not None:
+        deposit_candidates = deposit_candidates & ~persistent_noise_mask
+
+    deposit_candidates = binary_fill_holes(deposit_candidates)
+    deposit_labeled, n_deposit = connected_components(deposit_candidates)
+    deposit_mask = np.zeros(dem.shape, dtype=bool)
+    for rid in range(1, n_deposit + 1):
+        region = deposit_labeled == rid
+        if int(region.sum()) >= min_area_m2:
+            deposit_mask |= region
+
+    # Contours
+    release_contours = find_contours(release_mask.astype(float), 0.5)
+    deposit_contours = find_contours(deposit_mask.astype(float), 0.5)
+
+    rel_area = float(release_mask.sum())
+    dep_area = float(deposit_mask.sum())
+    rel_vol = float(np.nansum(dhs_anomaly[release_mask])) \
+        if release_mask.any() else 0.0
+    dep_vol = float(np.nansum(dhs_anomaly[deposit_mask])) \
+        if deposit_mask.any() else 0.0
+
+    return {
+        'release_mask':      release_mask,
+        'deposit_mask':      deposit_mask,
+        'crown_edges':       np.zeros(dem.shape, dtype=bool),
+        'dhs_anomaly':       dhs_anomaly,
+        'release_contours':  release_contours,
+        'deposit_contours':  deposit_contours,
+        'release_area_m2':   rel_area,
+        'deposit_area_m2':   dep_area,
+        'release_volume_m3': rel_vol,
+        'deposit_volume_m3': dep_vol,
+        'start_zone_mask':   start_zone_mask,
+        'params': {
+            'method':              'minkernel',
+            'kernel_size':         kernel_size,
+            'threshold_sigma':     threshold_sigma,
+            'min_area_m2':         min_area_m2,
+            'min_slope_deg':       min_slope_deg,
+            'smooth_size':         smooth_size,
+            'persistent_noise_mask': persistent_noise_mask is not None,
+            'start_zone_mask':     start_zone_mask is not None,
+        },
+    }
+
+
+def _empty_minkernel_result(shape, dhs_anomaly, start_zone_mask):
+    from skimage.measure import find_contours
+    return {
+        'release_mask':      np.zeros(shape, dtype=bool),
+        'deposit_mask':      np.zeros(shape, dtype=bool),
+        'crown_edges':       np.zeros(shape, dtype=bool),
+        'dhs_anomaly':       dhs_anomaly,
+        'release_contours':  [],
+        'deposit_contours':  [],
+        'release_area_m2':   0.0,
+        'deposit_area_m2':   0.0,
+        'release_volume_m3': 0.0,
+        'deposit_volume_m3': 0.0,
+        'start_zone_mask':   start_zone_mask,
+        'params': {'method': 'minkernel'},
+    }
+
+
 def contours_to_geojson(contours: list, transform) -> dict:
     """
     Convert skimage pixel-coordinate contours to a GeoJSON FeatureCollection.
@@ -673,6 +859,13 @@ if __name__ == '__main__':
                         help="Date of 'before' survey (YYYY-MM-DD, default: 2026-01-14)")
     parser.add_argument('--date-after',    default='2026-01-20',
                         help="Date of 'after' survey (YYYY-MM-DD, default: 2026-01-20)")
+    parser.add_argument('--method', default='minkernel',
+                        choices=['minkernel', 'canny'],
+                        help="Detection method: minkernel (default) or canny")
+    parser.add_argument('--kernel-size',  type=int,   default=7,
+                        help="Min-kernel filter size in pixels (default 7)")
+    parser.add_argument('--threshold-sigma-mk', type=float, default=1.2,
+                        help="Min-kernel threshold in std devs (default 1.2)")
     parser.add_argument('--output-dir',    default=None)
     args = parser.parse_args()
 
@@ -787,32 +980,68 @@ if __name__ == '__main__':
     else:
         print("Start zone KML: not found, using full domain for release")
 
-    print(f"\nRunning boundary detection with params:")
-    print(f"  canny_sigma={args.canny_sigma}  low={args.canny_low}  high={args.canny_high}")
-    print(f"  erosion_sigma={args.erosion_sigma}  deposit_sigma={args.deposit_sigma}")
-    print(f"  min_area={args.min_area}m²  morph_radius={args.morph_radius}px")
-    print(f"  kml_mask={'yes' if kml_path else 'no'}")
+    if args.method == 'minkernel':
+        # --- Min-kernel detection ---
+        # Load start zone mask for min-kernel
+        mk_start_zone = None
+        if start_zone_kml_path:
+            mk_start_zone = load_slope_mask(
+                start_zone_kml_path, dem.shape, transform)
 
-    result = detect_boundaries(
-        hs_before, hs_after, dem, stn_dhs,
-        transform=transform,
-        kml_path=kml_path,
-        hs_pre_event=hs_pre_event,
-        stn_dhs_pre=stn_dhs_pre,
-        canny_sigma=args.canny_sigma,
-        canny_low=args.canny_low,
-        canny_high=args.canny_high,
-        erosion_threshold_sigma=args.erosion_sigma,
-        deposit_threshold_sigma=args.deposit_sigma,
-        min_area_m2=args.min_area,
-        morph_radius=args.morph_radius,
-        dem_roughness_threshold=args.dem_roughness,
-        min_slope_deg=args.min_slope,
-        persistent_noise_mask=persistent_noise_mask,
-        start_zone_kml=start_zone_kml_path,
-    )
+        print(f"\nRunning MIN-KERNEL boundary detection:")
+        print(f"  kernel_size={args.kernel_size}  "
+              f"threshold_sigma={args.threshold_sigma_mk}")
+        print(f"  min_area={args.min_area}m²  min_slope={args.min_slope}°")
 
-    print(f"\nResults:")
+        result = detect_minkernel(
+            hs_before, hs_after, dem, stn_dhs,
+            kernel_size=args.kernel_size,
+            threshold_sigma=args.threshold_sigma_mk,
+            min_area_m2=args.min_area,
+            min_slope_deg=args.min_slope,
+            persistent_noise_mask=persistent_noise_mask,
+            start_zone_mask=mk_start_zone,
+            transform=transform,
+        )
+        param_tag = (f"mk_k{args.kernel_size}_t{args.threshold_sigma_mk}"
+                     f"_sl{args.min_slope}_ma{int(args.min_area)}")
+
+    else:
+        # --- Canny + watershed detection ---
+        print(f"\nRunning CANNY+WATERSHED boundary detection:")
+        print(f"  canny_sigma={args.canny_sigma}  low={args.canny_low}  "
+              f"high={args.canny_high}")
+        print(f"  erosion_sigma={args.erosion_sigma}  "
+              f"deposit_sigma={args.deposit_sigma}")
+        print(f"  min_area={args.min_area}m²  morph_radius={args.morph_radius}px")
+        print(f"  kml_mask={'yes' if kml_path else 'no'}")
+
+        result = detect_boundaries(
+            hs_before, hs_after, dem, stn_dhs,
+            transform=transform,
+            kml_path=kml_path,
+            hs_pre_event=hs_pre_event,
+            stn_dhs_pre=stn_dhs_pre,
+            canny_sigma=args.canny_sigma,
+            canny_low=args.canny_low,
+            canny_high=args.canny_high,
+            erosion_threshold_sigma=args.erosion_sigma,
+            deposit_threshold_sigma=args.deposit_sigma,
+            min_area_m2=args.min_area,
+            morph_radius=args.morph_radius,
+            dem_roughness_threshold=args.dem_roughness,
+            min_slope_deg=args.min_slope,
+            persistent_noise_mask=persistent_noise_mask,
+            start_zone_kml=start_zone_kml_path,
+        )
+        pre_tag = "" if args.no_pre_event else "_prefilter"
+        noise_tag = "" if args.no_noise_mask else "_noise"
+        param_tag = (f"cs{args.canny_sigma}_lo{args.canny_low}"
+                     f"_hi{args.canny_high}_sl{args.min_slope}"
+                     f"{noise_tag}_es{args.erosion_sigma}"
+                     f"_ma{int(args.min_area)}{pre_tag}")
+
+    print(f"\nResults ({args.method}):")
     print(f"  Release area:  {result['release_area_m2']:.0f} m²")
     print(f"  Deposit area:  {result['deposit_area_m2']:.0f} m²")
     print(f"  Release vol:   {result['release_volume_m3']:.1f} m³")
@@ -820,10 +1049,6 @@ if __name__ == '__main__':
     print(f"  Release contours: {len(result['release_contours'])}")
     print(f"  Deposit contours: {len(result['deposit_contours'])}")
 
-    pre_tag = "" if args.no_pre_event else "_prefilter"
-    noise_tag = "" if args.no_noise_mask else "_noise"
-    param_tag = (f"cs{args.canny_sigma}_lo{args.canny_low}_hi{args.canny_high}_sl{args.min_slope}{noise_tag}"
-                 f"_es{args.erosion_sigma}_ma{int(args.min_area)}{pre_tag}")
     out_path = plot_avalanche_boundaries(
         hs_before, hs_after, dem, transform, result,
         period_id=period_id,
