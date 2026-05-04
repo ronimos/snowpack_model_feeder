@@ -426,7 +426,7 @@ def step_scenarios(cfg, args):
         a_ca_list.append(A_ca)
 
         # Extract hand hardness at trigger cluster from SNOWPACK profile
-        hh_depth_m, hh_value = None, None
+        hh_depth_m, hh_depth_mid_m, hh_value = None, None, None
         snap_ts = np.datetime64(f"{args.snapshot_date}T18:00")
         locs = ds.coords['location'].values
         # Match location name format: 'cluster_XXXX_cluster_XXXX' or 'cluster_XXXX'
@@ -447,8 +447,7 @@ def step_scenarios(cfg, args):
             if sq:
                 ds_t = ds_t.squeeze(sq)
             if 'hand_hardness' not in ds_t:
-                print(f"    hand_hardness: variable not in Zarr dataset")
-                print(f"    Available vars: {list(ds_t.data_vars)[:15]}...")
+                print(f"    scour_depth: hand_hardness not in Zarr dataset")
             else:
                 try:
                     hh = ds_t['hand_hardness'].values
@@ -458,45 +457,100 @@ def step_scenarios(cfg, args):
                     # SNOWPACK hand hardness uses negative values:
                     #   -1=F, -2=4F, -3=1F, -4=P, -5=K, -6=I
                     # More negative = harder. "> 1F" means hh < -3.
-                    # Any non-NaN, non-zero value means HH is assigned.
                     has_hh = ~np.isnan(hh) & (hh < 0)
                     n_valid = int(np.sum(has_hh))
-                    print(f"    hand_hardness: {n_layers} layers, "
-                          f"{n_valid} with valid HH, HS={hs_cm:.1f}cm")
 
-                    # Find topmost layer harder than 1F (hh < -3)
-                    harder_than_1f = has_hh & (hh < -3)
-                    if not harder_than_1f.any():
-                        # Fall back to any assigned HH
-                        harder_than_1f = has_hh
+                    # Find the layer height variable
+                    z_var = None
+                    for zname in ('height', 'z', 'layer_height'):
+                        if zname in ds_t:
+                            z_var = zname
+                            break
 
-                    if harder_than_1f.any():
-                        idx = np.where(harder_than_1f)[0][-1]  # topmost
-                        hh_value = float(hh[idx])
-                        # Layer heights from ground — try 'height' (xsnow)
-                        # then 'z' as fallback
-                        z_var = None
-                        for zname in ('height', 'z', 'layer_height'):
-                            if zname in ds_t:
-                                z_var = zname
-                                break
-                        if z_var is not None:
-                            z = ds_t[z_var].values
-                            hh_depth_m = (hs_cm - float(z[idx])) / 100.0
-                            print(f"    → HH={hh_value:.1f} at "
-                                  f"depth={hh_depth_m:.2f}m from surface"
-                                  f" (layer {idx}, {z_var}={z[idx]:.1f}cm)")
-                        else:
-                            # Fallback: estimate depth from layer index
-                            hh_depth_m = None
-                            print(f"    hand_hardness: no height variable "
-                                  f"found ({list(ds_t.data_vars)[:10]}...)")
-                            print(f"    → HH={hh_value:.1f} at layer {idx}"
-                                  f" (depth unknown)")
+                    if z_var is None:
+                        print(f"    scour_depth: no height variable found")
                     else:
-                        print(f"    hand_hardness: no layers with valid HH")
+                        z = ds_t[z_var].values  # cm, from ground, per layer
+
+                        # Get slab thickness = depth from surface to failure plane
+                        slab_thick_m = None
+                        if t_cid in snap_features.index and \
+                           'slab_thickness' in snap_features.columns:
+                            st = snap_features.loc[t_cid, 'slab_thickness']
+                            if isinstance(st, pd.Series):
+                                st = st.iloc[0]
+                            try:
+                                slab_thick_m = float(st)
+                            except (ValueError, TypeError):
+                                pass
+
+                        if slab_thick_m is None or np.isnan(slab_thick_m):
+                            print(f"    scour_depth: no slab_thickness "
+                                  f"for trigger cid={t_cid}")
+                        else:
+                            # Failure plane height from ground (cm)
+                            fp_height_cm = hs_cm - slab_thick_m * 100.0
+                            fp_mid_cm = hs_cm - slab_thick_m * 50.0  # midpoint
+
+                            # Find the layer index at the failure plane
+                            # Layers are bottom-to-top, z is height from ground
+                            fp_layer_idx = None
+                            for li in range(n_layers - 1, -1, -1):
+                                if z[li] <= fp_height_cm:
+                                    fp_layer_idx = li
+                                    break
+
+                            if fp_layer_idx is None:
+                                fp_layer_idx = 0
+
+                            print(f"    scour_depth: {n_layers} layers, "
+                                  f"{n_valid} with valid HH, "
+                                  f"HS={hs_cm:.1f}cm")
+                            print(f"    Failure plane at "
+                                  f"{fp_height_cm:.1f}cm from ground "
+                                  f"(slab={slab_thick_m:.2f}m, "
+                                  f"layer idx={fp_layer_idx})")
+
+                            # Scan DOWNWARD from failure plane to find
+                            # first hard layer (HH harder than 1F = hh < -3)
+                            # This is the entrainable depth — how deep the
+                            # avalanche can scour before hitting resistance.
+                            hard_layer_idx = None
+                            for li in range(fp_layer_idx, -1, -1):
+                                if has_hh[li] and hh[li] < -3:
+                                    hard_layer_idx = li
+                                    break
+
+                            if hard_layer_idx is not None:
+                                hard_z = float(z[hard_layer_idx])
+                                # Depth from bottom of failure plane
+                                scour_bottom = (fp_height_cm - hard_z) / 100.0
+                                # Depth from midpoint of failure plane
+                                scour_mid = (fp_mid_cm - hard_z) / 100.0
+                                hh_value = float(hh[hard_layer_idx])
+
+                                # Use bottom-of-failure-plane as primary
+                                hh_depth_m = max(scour_bottom, 0.0)
+                                hh_depth_mid_m = max(scour_mid, 0.0)
+
+                                print(f"    → Hard layer (HH={hh_value:.1f}) "
+                                      f"at {hard_z:.1f}cm from ground")
+                                print(f"    → Scour from failure plane bottom: "
+                                      f"{scour_bottom:.2f}m")
+                                print(f"    → Scour from failure plane mid: "
+                                      f"{scour_mid:.2f}m")
+                            else:
+                                # No hard layer below failure plane —
+                                # entrainable all the way to ground
+                                hh_depth_m = fp_height_cm / 100.0
+                                hh_depth_mid_m = fp_mid_cm / 100.0
+                                hh_value = None
+                                print(f"    → No hard layer below failure "
+                                      f"plane — scour to ground: "
+                                      f"{hh_depth_m:.2f}m")
+
                 except Exception as e:
-                    print(f"    hand_hardness extraction failed for "
+                    print(f"    scour_depth extraction failed for "
                           f"cid={t_cid}: {e}")
                     import traceback
                     traceback.print_exc()
@@ -572,7 +626,8 @@ def step_scenarios(cfg, args):
                     mu                 = args.mu,
                     xi                 = args.xi,
                     profile            = raster_profile,
-                    scour_depth_m      = hh_depth_m,
+                    scour_depth_m         = hh_depth_m,
+                    scour_depth_mid_m     = hh_depth_mid_m,
                     hand_hardness_value   = hh_value,
                 )
                 # Augment row with trigger rank and sk38
@@ -745,3 +800,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    
