@@ -343,29 +343,36 @@ def run_reinit(cfg,
         sno_path = sno_dir / sno_name
 
         if not sno_path.exists():
-            sno_name = f"cluster_{cid:04d}_cluster_{cid:04d}.sno"
+            sno_name = f"cluster_{cid:04d}_cluster_{cid:04d}_res.sno"
             sno_path = sno_dir / sno_name
 
         if not sno_path.exists():
             n_missing += 1
             continue
 
+        sno_data = read_sno(str(sno_path))
+        hs_before_scour = sum(float(l['Layer_Thick'])
+                              for l in sno_data['layers'])
+
         if cid in slab_thickness:
             scour_m = slab_thickness[cid]
             source = 'features'
         else:
-            sno_data = read_sno(str(sno_path))
-            hs_m = sum(float(l['Layer_Thick']) for l in sno_data['layers'])
-            scour_m = hs_m * 0.80
+            scour_m = hs_before_scour * 0.80
             source = 'HS×0.80'
+
+        # Cap scour at current HS — can't remove more snow than exists.
+        # This handles timing mismatches where slab_thickness is from
+        # the snapshot date but the .sno is from a different time
+        # (e.g., end of season with melt/settlement).
+        if scour_m > hs_before_scour:
+            print(f"  {cid:04d}: scour {scour_m:.2f}m > HS {hs_before_scour:.2f}m "
+                  f"— capping at HS")
+            scour_m = hs_before_scour
 
         if scour_m <= 0.01:
             n_skipped += 1
             continue
-
-        sno_data = read_sno(str(sno_path))
-        hs_before_scour = sum(float(l['Layer_Thick'])
-                              for l in sno_data['layers'])
 
         scoured = scour_sno(sno_data, scour_m, event_ts)
         ss = scoured['scour_stats']
@@ -466,4 +473,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
+    

@@ -220,8 +220,8 @@ def profile_features(ds_t_loc, min_depth_cm: float) -> dict:
     if slab_m is None:
         return result
 
-    # --- Stability at interface (±5cm = ±0.05m) ---
-    near_interface = ok & (np.abs(z - interface_z) <= 0.05)
+    # --- Stability at interface (±5cm window, z is in cm) ---
+    near_interface = ok & (np.abs(z - interface_z) <= 5.0)
     for var in ('sk38', 'ssi', 'sn38', 'stab_deformation_rate'):
         try:
             v = ds_t_loc[var].values.ravel()
@@ -242,9 +242,9 @@ def profile_features(ds_t_loc, min_depth_cm: float) -> dict:
             except Exception:
                 result[f'slab_{var}'] = np.nan
 
-        # Slab thickness: height from interface to snow surface
+        # Slab thickness: distance from interface to snow surface
         slab_z = z[slab_m & ok]
-        # slab thickness = distance from interface to surface = -interface_z / 100
+        # interface_z is in cm (negative from surface), convert to metres
         result['slab_thickness'] = float(-interface_z / 100.0)                   if len(slab_z) else np.nan
 
         # Most common grain type in slab (first digit = grain class)

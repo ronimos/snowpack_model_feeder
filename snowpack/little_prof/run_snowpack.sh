@@ -25,8 +25,11 @@ first_smet=("$SMET_DIR"/cluster_*.smet)
 BDATE=$(awk '/^\[DATA\]/{found=1; next} found{print $1; exit}' "${first_smet[0]}")
 EDATE="${2:-2026-03-31}T18:00"
 
+# --- Optional: run only specific clusters ---
+# Pass a file with one cluster ID per line (e.g., reinit_stats JSON)
+CLUSTERS_FILE="${3:-}"
+
 # --- Concurrency ---
-# Mirror the operational script's ps-count throttle.
 MAX_JOBS=30
 
 # --- Sanity checks ---
@@ -49,11 +52,41 @@ echo "=== Little Professor SNOWPACK run ==="
 echo "    Start:    $BDATE"
 echo "    End:      $EDATE"
 echo "    Clusters: ${#smets[@]}"
+if [[ -n "$CLUSTERS_FILE" ]]; then
+echo "    Filter:   $CLUSTERS_FILE"
+fi
 echo "    Started:  $(date -u)"
 echo ""
 
+# Build cluster filter set (if provided)
+declare -A CLUSTER_FILTER
+if [[ -n "$CLUSTERS_FILE" && -f "$CLUSTERS_FILE" ]]; then
+    # Support both plain text (one cid per line) and JSON (reinit_stats format)
+    if [[ "$CLUSTERS_FILE" == *.json ]]; then
+        while IFS= read -r cid_num; do
+            CLUSTER_FILTER["cluster_$(printf '%04d' "$cid_num")"]=1
+        done < <(python3 -c "
+import json, sys
+with open('$CLUSTERS_FILE') as f:
+    data = json.load(f)
+for item in data:
+    print(item['cid'])
+")
+    else
+        while IFS= read -r line; do
+            CLUSTER_FILTER["$line"]=1
+        done < "$CLUSTERS_FILE"
+    fi
+    echo "    Filtered to ${#CLUSTER_FILTER[@]} clusters"
+fi
+
 for smet in "${smets[@]}"; do
     cid=$(basename "$smet" .smet)
+
+    # Skip if cluster filter is active and this cluster isn't in it
+    if [[ ${#CLUSTER_FILTER[@]} -gt 0 && -z "${CLUSTER_FILTER[$cid]:-}" ]]; then
+        continue
+    fi
 
     # Extract cluster coordinates from SMET header for .sno substitution
     lat=$(awk -F'=' '/^latitude/{gsub(/ /,"",$2); print $2}' "$smet")
@@ -61,8 +94,9 @@ for smet in "${smets[@]}"; do
     alt=$(awk -F'=' '/^altitude/{gsub(/ /,"",$2); print $2}' "$smet")
 
     # Initial conditions: prefer a previous run's restart file, else substitute
-    # the coordinate placeholders in the template and write a per-cluster .sno
-    res_sno="$OUTPUT_DIR/${cid}_res.sno"
+    # the coordinate placeholders in the template and write a per-cluster .sno.
+    # SNOWPACK writes restart as ${station}_${experiment}.sno = ${cid}_${cid}.sno
+    res_sno="$OUTPUT_DIR/${cid}_${cid}.sno"
     cluster_sno="$SNOW_IN_DIR/${cid}.sno"
     if [[ -f "$res_sno" ]]; then
         cp "$res_sno" "$cluster_sno"
@@ -127,33 +161,8 @@ if [[ $n_fail -gt 0 ]]; then
     done
 fi
 
-wait
-echo "=== Run complete: $(date -u) ==="
-
-# Quick summary: count successes vs failures
-n_ok=0
-n_fail=0
-for log in "$OUTPUT_DIR"/cluster_*.log; do
-    if grep -q "done!" "$log" 2>/dev/null; then
-        n_ok=$((n_ok + 1))
-    else
-        n_fail=$((n_fail + 1))
-    fi
-done
-echo "    OK: $n_ok   Failed: $n_fail"
-
-if [[ $n_fail -gt 0 ]]; then
-    echo "    Failed clusters:"
-    for log in "$OUTPUT_DIR"/cluster_*.log; do
-        if ! grep -q "done!" "$log" 2>/dev/null; then
-            echo "      $(basename "$log" .log)"
-        fi
-    done
-fi
-
-# --- NEW: Build Zarr Store ---
-
+# --- Build Zarr Store ---
 echo ""
 echo "=== Aggregating results to Zarr ==="
-/home/ron/snowpack_model_feeder/.venv/bin/python3 /home/ron/snowpack_model_feeder/snowpack/little_prof/build_zarr_chunked.py
+/home/ron/snowpack_model_feeder/.venv/bin/python3 /home/ron/snowpack/little_prof/build_zarr_chunked.py
 echo "=== Zarr Build Complete ==="

@@ -50,6 +50,17 @@
 
 - [ ] **Step 6 cleanup** — remove remaining duplicated logic between diagnostic scripts (`analyze_release_zone.py`, `visualize_snowpack.py`) and modules.
 
+- [ ] **Multi-event SNOWPACK reinitialization** — current shell scripts support a single `--reinit` event. For seasons with multiple avalanches (same or different paths), extend to accept an events JSON file listing all events chronologically. The pipeline would loop: run SNOWPACK to event A → reinit A → run to event B → reinit B → ... → run to end of season. Each reinit scours a different (possibly overlapping) set of clusters. Events JSON format:
+  ```json
+  [
+      {"event_date": "2026-01-18", "date_before": "2026-01-14",
+       "date_after": "2026-01-20", "label": "Little Professor D2"},
+      {"event_date": "2026-02-05", "date_before": "2026-01-27",
+       "date_after": "2026-02-10", "label": "Seven Sisters D1.5"}
+  ]
+  ```
+  Each event needs its own survey pair for detection (or a pre-drawn GeoJSON) and its own snapshot date for slab thickness. Clusters affected by earlier events will already have reduced HS when subsequent reinits run.
+
 ---
 
 ## Physical Model Improvements
@@ -93,3 +104,51 @@
 ## Visualization / Presentation
 
 - [ ] **High-resolution avalanche photo with Google Earth overlay** — acquire a higher-quality version of the Jan 18 avalanche photo (current image is a phone photo from Loveland Ski Area). Georeference the release area, track, and deposit boundaries and export as a KMZ overlay for Google Earth. This would allow interactive comparison of the observed avalanche extent against the BFS/probabilistic model polygons in 3D terrain context, and produce presentation-quality figures showing the model chain output draped on satellite imagery.
+
+---
+
+## Operational Daily Mode
+
+Design and implement a daily-run operational pipeline that provides continuous hazard assessment between UAS surveys and auto-corrects when new survey data arrives.
+
+### Daily forward mode
+
+- [ ] **Daily SMET extension** — append new hourly weather station records to existing SMET files instead of regenerating all ~6,636 files. Only new rows (since last run) get added. Requires tracking the last-written timestamp per file.
+
+- [ ] **Daily SNOWPACK incremental run** — run SNOWPACK forward one day from restart files. Extract stability snapshot (Sk38, SSI, Λ, τ_g) for the current day and generate a daily hazard assessment. Between surveys, the HS spatial distribution stays frozen at the last survey — only the stratigraphy evolves (sintering, TG metamorphism, new snow loading).
+
+- [ ] **Daily scenario refresh** — rerun `step_scenarios` on the current snapshot date to update trigger locations and release polygons as the snowpack evolves. The daily spatial variability is station-driven only (no UAS data), so the release geometry changes are from stratigraphy evolution, not from new spatial HS information.
+
+### Survey correction mode
+
+- [ ] **Back-correction on new survey** — when a new UAS survey arrives, the gap-filled hourly HS between the last two surveys was station-only extrapolation. The new survey reveals the actual spatial transport. Pipeline must: (1) replace gap-filled HS with observed transport for the inter-survey period, (2) regenerate SMETs only from the previous survey date forward, (3) rerun SNOWPACK from that date via restart files, (4) rebuild the Zarr for affected timesteps, (5) rerun analysis/scenarios.
+
+- [ ] **Partial DEM resampling** — only resample the new survey to the 1 m grid. Don't reprocess the existing surveys. Currently `step_resample` regenerates everything.
+
+### Efficiency improvements
+
+- [ ] **SMET append-only writes** — current `step_smet` rewrites all files from scratch. An append mode would read the existing file, find the last timestamp, and write only new rows. Saves I/O and ~10 min per run on 6,636 files.
+
+- [ ] **Zarr append** — add new timesteps to the existing Zarr store instead of rebuilding from all `.pro` files (~2 hours saved). Requires tracking which timesteps are already in the store and appending new ones from the latest `.pro` output.
+
+- [ ] **Feature caching with change detection** — only recompute Meloche features for clusters where HS changed by more than a threshold (e.g., 5 cm) since the last extraction. Cache the previous feature values and diff against the new Zarr snapshot. For daily forward mode, only a fraction of clusters will change meaningfully.
+
+- [ ] **Partial SNOWPACK rerun** — when correcting after a new survey, only rerun clusters whose SMET files actually changed (i.e., clusters where the gap-filled HS differs from the survey-corrected HS by more than a threshold). Use the existing `CLUSTERS_FILE` filter in `run_snowpack.sh`.
+
+### Cluster management
+
+- [ ] **Mid-season cluster splitting with inheritance** — when a new survey reveals that a cluster's internal HS variability exceeds `max_cluster_std_m`, the cluster is split via MiniBatchKMeans bisection (same as initial clustering). One child inherits the parent's identity: same cluster ID, `.sno` restart file, `.smet`, `.pro` history, and Zarr entries. Nothing changes for this child — it continues seamlessly. The other child is new and needs:
+  1. A copy of the parent's `.sno` at the split timestamp (same stratigraphy — they were one cluster until the survey showed they're different)
+  2. A new SMET generated from the gap-filled hourly HS for the new child's pixel membership
+  3. SNOWPACK run from the split date forward (incremental from the copied `.sno`)
+  
+  The secondary child starts with the correct stratigraphy and only diverges from the split point. This is cheaper than rerunning from season start and physically justified — the snowpack was identical until the survey revealed heterogeneity.
+  
+  Implementation considerations:
+  - Cluster IDs for new children must not collide with existing IDs (use max_existing_id + 1)
+  - The cluster map raster needs updating (remap parent pixels to two children)
+  - The neighbour graph (k=8) needs rebuilding for affected clusters
+  - Downstream consumers (release geometry, boundary model) pick up the new cluster map automatically
+  - Track split lineage in a `cluster_splits.json` for provenance
+
+- [ ] **Cluster quality monitoring** — track intra-cluster HS variability at each new survey. Flag clusters exceeding `max_cluster_std_m` (8 cm) as split candidates. Report statistics: how many clusters need splitting, where on the slope, and how much the splitting would change the cluster count. This provides a data-driven trigger for when splitting is needed rather than arbitrary re-clustering.
