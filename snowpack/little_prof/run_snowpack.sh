@@ -164,5 +164,5 @@ fi
 # --- Build Zarr Store ---
 echo ""
 echo "=== Aggregating results to Zarr ==="
-/home/ron/snowpack_model_feeder/.venv/bin/python3 /home/ron/snowpack/little_prof/build_zarr_chunked.py
+/home/ron/snowpack_model_feeder/.venv/bin/python3 /home/ron/snowpack_model_feeder/snowpack/little_prof/build_zarr_chunked.py
 echo "=== Zarr Build Complete ==="
