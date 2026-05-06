@@ -16,6 +16,7 @@ wheels/
 # Logs and databases
 *.log
 *.db
+nohup.out
 
 # Local scripts and data
 data/eval

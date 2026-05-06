@@ -337,7 +337,7 @@ The pipeline should alert a human (not auto-remediate) when:
 
 ### 10.2 Uncertainty communication
 
-The hazard team needs clear, actionable uncertainty signals:
+The forecasting team needs clear, actionable uncertainty signals:
 
 - **Traffic light:** green (no scenarios reach road), yellow (some scenarios reach road), red (median scenario reaches road)
 - **Confidence indicator:** high (T+0, recent survey), medium (T+1, or >5 days since survey), low (T+2, or >10 days since survey)
@@ -350,7 +350,7 @@ Archive daily T+0/T+1/T+2 forecasts. Post-season, evaluate:
 
 - How often did T+1 correctly predict T+0 outcome? (hit rate)
 - How much did the runout envelope shrink from T+2 → T+0? (convergence rate)
-- For the days roads were closed, what did T+1 say? (decision-support value)
+- For the times roads were closed or avalanche mitigation was called, what did T+1 say? (decision-support value)
 - False alarm rate: scenarios predicted road impact but no avalanche occurred
 
 This calibration data justifies the system's operational value to stakeholders (CDOT, avalanche programs) and identifies which forecast components need improvement.

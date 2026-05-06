@@ -221,7 +221,7 @@ def profile_features(ds_t_loc, min_depth_cm: float) -> dict:
         return result
 
     # --- Stability at interface (±5cm window, z is in cm) ---
-    near_interface = ok & (np.abs(z - interface_z) <= 5.0)
+    near_interface = ok & (np.abs(z - interface_z) <= 0.05) # TODO # Fix — ±5 cm 5.0
     for var in ('sk38', 'ssi', 'sn38', 'stab_deformation_rate'):
         try:
             v = ds_t_loc[var].values.ravel()

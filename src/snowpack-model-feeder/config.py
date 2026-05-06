@@ -13,7 +13,7 @@ from typing import Optional
 class ProjectConfig:
     # --- Paths ---
     project_dir: Path = Path(".")
-    dem_path: Path = Path("data/dem/251126_Professor_PTC_DSM.tiff")
+    dem_path: Path = Path("data/dem/251126_Professor-DSM.tiff")
     survey_dir: Path = Path("data/surveys")
     weather_csv: Path = Path("data/weather/weather_data.csv")
     boundary_kml: Path = Path("data/boundaries/Little_Proff.kml")
