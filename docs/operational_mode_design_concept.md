@@ -78,7 +78,7 @@ The daily forward mode captures stratigraphy evolution (a buried WL weakening ov
 
 ### 3.1 Purpose
 
-Extend the pipeline 72 hours into the future to provide lead time for mitigation decisions. The hazard team sees "instability building at Little Professor, Sk38 crosses critical threshold tomorrow afternoon, D2 release probability peaks at T+2 with incoming storm" — actionable information for staging crews, closing roads, or pre-positioning equipment.
+Extend the pipeline 72 hours into the future to provide lead time for mitigation decisions. The forecasters see "instability building at Little Professor, Sk38 crosses critical threshold tomorrow afternoon, D2 release probability peaks at T+2 with incoming storm" — actionable information for staging crews, closing roads, or pre-positioning equipment.
 
 ### 3.2 Workflow
 
@@ -425,7 +425,7 @@ Track the convergence rate: if T+1 isn't consistently better than T+2, either th
 
 **Metric: simulated vs observed HS.** At each survey, compare SNOWPACK's simulated HS per cluster against the observed HS from the UAS survey. This evaluates the full chain: SMET forcing → SNOWPACK physics → HS output.
 
-**Metric: stratigraphy validation.** When manual snowpit observations are available (e.g., from CAIC field teams), compare SNOWPACK's predicted layer structure against observed:
+**Metric: stratigraphy validation.** When manual snowpit observations are available, compare SNOWPACK's predicted layer structure against observed:
 - WL depth: predicted vs observed (cm)
 - WL grain type: predicted vs observed (FC/DH classification)
 - Slab density: predicted vs observed (kg/m³)
