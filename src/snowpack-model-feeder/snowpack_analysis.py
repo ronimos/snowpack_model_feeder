@@ -160,7 +160,8 @@ def split_wl_slab(grain_type, z):
     order        = np.argsort(z_ok)
     gt_sorted    = gt_ok[order]
     z_sorted     = z_ok[order]
-    is_wl_sorted = (gt_sorted // 100) >= 4   # FC=4xx, DH=5xx
+    # Only FC (4xx) and DH (5xx) are weak layer grain types
+    is_wl_sorted = (gt_sorted // 100 == 4) | (gt_sorted // 100 == 5)
 
     # Must start with at least one WL layer at the base
     if not is_wl_sorted[0]:
@@ -221,7 +222,7 @@ def profile_features(ds_t_loc, min_depth_cm: float) -> dict:
         return result
 
     # --- Stability at interface (±5cm window, z is in cm) ---
-    near_interface = ok & (np.abs(z - interface_z) <= 0.05) # TODO # Fix — ±5 cm 5.0
+    near_interface = ok & (np.abs(z - interface_z) <= 5.0) # TODO # Fix — ±5 cm 5.0
     for var in ('sk38', 'ssi', 'sn38', 'stab_deformation_rate'):
         try:
             v = ds_t_loc[var].values.ravel()

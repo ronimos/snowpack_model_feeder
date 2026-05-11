@@ -444,7 +444,7 @@ def cross_date_test(ds, groups: dict, location_names,
         n_locs = ds_t.sizes.get('location', 1)
         for i in range(n_locs):
             try:
-                ds_loc = ds_t.isel(location=i) if 'location' in ds_t.dims                          else ds_t
+                ds_loc = ds_t.isel(location=i) if 'location' in ds_t.dims else ds_t
                 feat = profile_features(ds_loc, min_depth_cm)
                 if feat:
                     feat['cluster_id'] = loc_ids[i]
@@ -504,7 +504,7 @@ def cross_date_test(ds, groups: dict, location_names,
             probs = []
             for i in range(n_locs):
                 try:
-                    ds_loc = ds_t.isel(location=i) if 'location' in ds_t.dims                              else ds_t
+                    ds_loc = ds_t.isel(location=i) if 'location' in ds_t.dims else ds_t
                     feat = profile_features(ds_loc, min_depth_cm)
                     if not feat:
                         continue
@@ -631,7 +631,7 @@ def main():
                                 'slope_snowpack.zarr')
     parser.add_argument('--release-geojson', default=None)
     parser.add_argument('--min-depth',  type=float, default=30.0)
-    parser.add_argument('--snapshot-date', default='2026-01-17',
+    parser.add_argument('--snapshot-date', default='2026-01-18',
                         help='Date for snapshot analysis (default: day before event)')
     parser.add_argument('--classifier', action='store_true',
                         help='Train RF classifier and plot feature importance')

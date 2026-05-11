@@ -129,11 +129,35 @@ Design and implement a daily-run operational pipeline that provides continuous h
 
 - [ ] **SMET append-only writes** — current `step_smet` rewrites all files from scratch. An append mode would read the existing file, find the last timestamp, and write only new rows. Saves I/O and ~10 min per run on 6,636 files.
 
-- [ ] **Zarr append** — add new timesteps to the existing Zarr store instead of rebuilding from all `.pro` files (~2 hours saved). Requires tracking which timesteps are already in the store and appending new ones from the latest `.pro` output.
+- [ ] **Zarr append** — add new timesteps to the existing Zarr store instead of rebuilding from all `.pro` files (~2 hours saved). Requires tracking which timesteps are already in the store and appending new ones from the latest `.pro` output. **Important:** on full rebuilds (new DEM, new cluster map), the Zarr must be deleted before rebuilding — stale locations from previous cluster maps cause duplicate entries and silently corrupt feature extraction (doubled layer arrays, wrong slab_thickness). Add `rm -rf slope_snowpack.zarr` to the `--clean` block in `run_full_pipeline.sh`.
 
 - [ ] **Feature caching with change detection** — only recompute Meloche features for clusters where HS changed by more than a threshold (e.g., 5 cm) since the last extraction. Cache the previous feature values and diff against the new Zarr snapshot. For daily forward mode, only a fraction of clusters will change meaningfully.
 
 - [ ] **Partial SNOWPACK rerun** — when correcting after a new survey, only rerun clusters whose SMET files actually changed (i.e., clusters where the gap-filled HS differs from the survey-corrected HS by more than a threshold). Use the existing `CLUSTERS_FILE` filter in `run_snowpack.sh`.
+
+### NWP forecast mode
+
+- [ ] **3-day forecast with NWP forcing** — extend the daily pipeline to run SNOWPACK 3 days into the future using NWP (numerical weather prediction) forecast data as forcing. Generate scenario ensembles at three snapshot dates: today (T+0), tomorrow (T+1), and day-after-tomorrow (T+2). Each snapshot produces trigger locations, release polygons, and runout probability envelopes, enabling hazard teams to plan mitigation timing and resource allocation before conditions deteriorate.
+
+  Workflow:
+  1. Ingest NWP forecast (HRRR, NAM, or GFS) for the next 72 hours — extract T, precip, wind speed/direction, RH at the study site
+  2. Convert NWP fields to SMET format and append to existing cluster SMET files (after the last observed timestamp)
+  3. Run SNOWPACK incrementally from now to T+72h
+  4. Extract stability snapshots at T+0, T+1, T+2
+  5. Run `step_scenarios` at each snapshot → 3 sets of release polygons + runout envelopes
+  6. Generate a forecast summary: which paths are approaching critical instability, when, and with what confidence
+
+  Key considerations:
+  - NWP forcing has spatial resolution of 1-3 km vs the 1 m pipeline grid — needs downscaling, at minimum lapse-rate correction for temperature and orographic enhancement for precipitation
+  - Wind fields from NWP are coarse — WindNinja could re-downscale NWP winds to 1 m, but this adds compute time. For forecast mode, station wind + NWP trend may be sufficient
+  - **Rolling forecast convergence:** each day the forecast refreshes with the latest AWS observations and newest NWP run. Today's T+0 replaces yesterday's T+1 with 24h of real data, so forecasts converge toward reality as the target date approaches. Yesterday's T+2 (48h NWP) → today's T+1 (24h observed + 24h NWP) → tomorrow's T+0 (mostly observed). Archive the daily forecast snapshots to track convergence and calibrate forecast skill over the season
+  - **Uncertainty scaling with lead time:** widen size_factor range at longer lead times to reflect decreasing forecast confidence. E.g.:
+    - T+0: size_factors [0.85, 1.00, 1.15] (observed forcing, tight bounds)
+    - T+1: size_factors [0.70, 0.85, 1.00, 1.15, 1.30] (mixed forcing)
+    - T+2: size_factors [0.55, 0.70, 0.85, 1.00, 1.15, 1.30, 1.45] (NWP-dominated, wide bounds)
+    This naturally produces wider runout envelopes at longer lead times — the hazard team sees "could reach the road at T+2" narrowing to "won't reach the road at T+0" as observations replace NWP
+  - When observed data arrives (next station update or next survey), the forecast branch gets pruned and replaced with observed forcing — same back-correction workflow as survey correction mode
+  - NWP data source needs to be automated (cron job pulling from NOMADS/AWS)
 
 ### Cluster management
 

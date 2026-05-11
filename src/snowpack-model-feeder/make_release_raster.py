@@ -11,7 +11,7 @@ All geometry and depth logic lives in release_geometry.py.
 Usage:
   python make_release_raster.py
   python make_release_raster.py --depth-source uniform --depth-m 0.6
-  python make_release_raster.py --depth-source snowpack --snapshot 2026-01-17
+  python make_release_raster.py --depth-source snowpack --snapshot 2026-01-18
 """
 import argparse
 import json
@@ -58,7 +58,7 @@ def main():
     parser.add_argument('--depth-source', choices=['snowpack', 'uniform'],
                         default='snowpack')
     parser.add_argument('--depth-m',   type=float, default=0.6)
-    parser.add_argument('--snapshot',  default='2026-01-17')
+    parser.add_argument('--snapshot',  default='2026-01-18')
     parser.add_argument('--density',   type=float, default=None)
     args = parser.parse_args()
 

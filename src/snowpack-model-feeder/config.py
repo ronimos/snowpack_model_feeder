@@ -13,7 +13,7 @@ from typing import Optional
 class ProjectConfig:
     # --- Paths ---
     project_dir: Path = Path(".")
-    dem_path: Path = Path("data/dem/251126_Professor-DSM.tiff")
+    dem_path: Path = Path("data/dem/251110_Professor_Ground-DSM_aligned.tiff")
     survey_dir: Path = Path("data/surveys")
     weather_csv: Path = Path("data/weather/weather_data.csv")
     boundary_kml: Path = Path("data/boundaries/Little_Proff.kml")
@@ -26,7 +26,7 @@ class ProjectConfig:
     release_geojson: Path = Path("data/boundaries/avalanche_release_area.geojson")
 
     # --- Scenario defaults ---
-    default_snapshot: str = "2026-01-17"
+    default_snapshot: str = "2026-01-18"
     n_triggers: int = 5
     size_factors: list = field(default_factory=lambda: [0.70, 0.85, 1.00, 1.15, 1.30])
     depth_percentiles: list = field(default_factory=lambda: [10, 50, 90])

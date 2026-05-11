@@ -26,7 +26,7 @@ As events accumulate, rerun with --append-pairs to grow training dataset.
 
 Usage:
   python src/snowpack-model-feeder/fit_boundary_model.py \
-      --snapshot-date 2026-01-17 \
+      --snapshot-date 2026-01-18 \
       --event-label "jan18_little_prof"
 """
 

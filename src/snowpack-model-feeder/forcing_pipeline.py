@@ -1019,7 +1019,7 @@ def main():
                         help="Pre-event survey date (reinit step)")
     parser.add_argument('--date-after', default='2026-01-20',
                         help="Post-event survey date (reinit step)")
-    parser.add_argument('--snapshot-date', default='2026-01-17',
+    parser.add_argument('--snapshot-date', default='2026-01-18',
                         help="SNOWPACK snapshot for slab thickness (reinit step)")
     parser.add_argument('--release-geojson', default=None,
                         help="Pre-drawn release GeoJSON (reinit step, "

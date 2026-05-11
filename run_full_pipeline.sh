@@ -127,9 +127,10 @@ echo ""
 echo ">>> Phase 2: SNOWPACK simulation"
 
 if [[ $CLEAN -eq 1 ]]; then
-    echo "    --clean: removing restart files, .pro, and per-cluster .sno"
+    echo "    --clean: removing restart files, .pro, per-cluster .sno, and Zarr"
     rm -f "$SNOWPACK_DIR"/output/*.sno
     rm -f "$SNOWPACK_DIR"/output/*.pro
+    rm -rf "$SNOWPACK_DIR"/output/slope_snowpack.zarr
     rm -f "$SNOWPACK_DIR"/input/snow/cluster_*.sno
     echo "    Cleaned. SNOWPACK will start from template.sno."
 fi

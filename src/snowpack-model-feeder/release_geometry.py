@@ -607,11 +607,15 @@ def propagate_release(
           1. Outside start zone KML (hard boundary)
           2. Distance cap: upslope > A_ca, downslope > stauchwall
           3. Downslope slope < 28° (terrain)
-          4. tau_g < MIN_PROPAGATION_TAU_G (slab too thin/flat)
-          5. |ΔΛ/Λ| > LAMBDA_JUMP_FACTOR: sharp slab discontinuity in
-             either direction arrests crack (stiffening OR softening)
-          6. |Δh/h| > THICKNESS_JUMP_FACTOR: sharp slab thickness change
-             in either direction arrests crack
+          4. tau_g < MIN_PROPAGATION_TAU_G (absolute floor, slab too thin/flat)
+          5. tau_g < trigger_tau_g × TAU_G_DROP_FACTOR (relative drop,
+             downslope/lateral only — upslope driven by elastic energy)
+          6. slab_thickness < MIN_PROPAGATION_SLAB (slab too thin to sustain
+             crack — K_I ∝ √h drops below K_Ic)
+          7. Lambda < MIN_PROPAGATION_LAMBDA (slab too weak/compliant —
+             primary slab-strength arrest, especially cross-slope)
+          8. |ΔΛ/Λ| > LAMBDA_JUMP_FACTOR: sharp slab discontinuity
+          9. |Δh/h| > THICKNESS_JUMP_FACTOR: sharp slab thickness change
         """
         # Hard boundary: start zone KML
         if start_zone_mask is not None:
@@ -649,6 +653,34 @@ def propagate_release(
         if not np.isnan(tau_g_nbr) and tau_g_nbr < MIN_PROPAGATION_TAU_G:
             return False
 
+        # Relative tau_g arrest — driving stress dropped significantly
+        # from trigger value. Captures terrain transitions (steeper/loaded
+        # release zone → flatter/thinner adjacent slope).
+        # Only applied downslope and laterally — upslope propagation is
+        # driven by stored elastic energy, not local tau_g, and naturally
+        # has lower tau_g as terrain flattens toward the ridge.
+        if not is_upslope and not np.isnan(tau_g_nbr) \
+                and tau_g_nbr < tau_g_relative_floor:
+            return False
+
+        # Minimum slab thickness — crack can't propagate into terrain
+        # where the slab is too thin to sustain fracture. The crack tip
+        # stress intensity factor K_I ∝ √h: thin slab → K_I < K_Ic → arrest.
+        # This is the physical mechanism for lateral and downslope arrest
+        # at terrain transitions where the slab pinches out.
+        h_nbr = nbr_props.get('slab_thickness', np.nan)
+        if not np.isnan(h_nbr) and h_nbr < MIN_PROPAGATION_SLAB:
+            return False
+
+        # Minimum Lambda — slab too weak/compliant to transmit fracture.
+        # Λ integrates slab thickness, elastic modulus, and WL shear
+        # modulus: a thin stiff slab can still propagate (high Λ),
+        # a thick soft slab may not (low Λ). This is the primary
+        # slab-strength arrest criterion for cross-slope propagation.
+        lam_nbr_abs = nbr_props.get('Lambda', np.nan)
+        if not np.isnan(lam_nbr_abs) and lam_nbr_abs < MIN_PROPAGATION_LAMBDA:
+            return False
+
         # LOCAL GRADIENT ARREST — compare neighbor to current propagating cluster
         # (not to trigger). Detects sharp slab edges and Λ discontinuities.
 
@@ -668,7 +700,7 @@ def propagate_release(
 
         # Slab thickness: arrest on sharp change in either direction
         h_current = current_props.get('slab_thickness', np.nan)
-        h_nbr     = nbr_props.get('slab_thickness', np.nan)
+        # h_nbr already fetched above for absolute cap
         if (not np.isnan(h_current) and not np.isnan(h_nbr)
                 and h_current > 0):
             rel_change = abs(h_nbr - h_current) / h_current
@@ -678,11 +710,27 @@ def propagate_release(
         return True
 
     # Gradient arrest thresholds — relative change in either direction
-    # LAMBDA_JUMP_FACTOR:    arrest if |ΔΛ/Λ| > 0.5 (50% change in either direction)
-    # THICKNESS_JUMP_FACTOR: arrest if |Δh/h|  > 0.25 (25% change in either direction)
+    # LAMBDA_JUMP_FACTOR:    arrest if |ΔΛ/Λ| > 0.15 (15% change in either direction)
+    # THICKNESS_JUMP_FACTOR: arrest if |Δh/h|  > 0.15 (15% change in either direction)
+    # TAU_G_DROP_FACTOR:     arrest if neighbor tau_g < trigger_tau_g × factor
     # size_factor multiplies threshold → larger size_factor = more tolerant = larger release
-    LAMBDA_JUMP_FACTOR    = 0.5
-    THICKNESS_JUMP_FACTOR = 0.25
+    LAMBDA_JUMP_FACTOR    = 0.15
+    THICKNESS_JUMP_FACTOR = 0.15
+    TAU_G_DROP_FACTOR     = 0.50   # arrest when tau_g drops below 50% of trigger's
+    MIN_PROPAGATION_SLAB  = 0.40   # m — slab too thin to sustain crack propagation
+    MIN_PROPAGATION_LAMBDA = 0.5   # m — slab too weak/compliant to transmit fracture
+                                   # Λ = √(E×h³ / (12×G_wl×D_wl)): integrates
+                                   # slab thickness, stiffness, and WL properties
+   
+
+    # Relative tau_g floor: arrest when driving stress drops significantly
+    # from the trigger's value. This captures the 2.3× tau_g contrast
+    # observed at the Jan 18 release boundary.
+    tau_g_trigger_val = trigger_props.get('tau_g', np.nan)
+    if not np.isnan(tau_g_trigger_val) and tau_g_trigger_val > 0:
+        tau_g_relative_floor = tau_g_trigger_val * TAU_G_DROP_FACTOR
+    else:
+        tau_g_relative_floor = MIN_PROPAGATION_TAU_G  # fallback to absolute
 
     # --- Flood-fill from trigger through qualifying clusters ---
     if not _qualifies(trigger_cluster_id, trigger_props):
@@ -876,11 +924,15 @@ def plot_release_comparison(
         transform,
         start_zone_mask=None,
         trigger_labels=None,
+        trigger_centroids=None,
         out_path=None,
         title: str = "Release polygon comparison") -> None:
     """
     Plot Meloche-derived polygons vs observed release area.
     One star marker per trigger nucleation point, labels in legend.
+
+    trigger_centroids : list of (x, y) UTM tuples, one per trigger.
+                        If None, falls back to polygon centroid.
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -929,8 +981,11 @@ def plot_release_comparison(
         ax.plot(xs, ys, color=color, linewidth=1.8, alpha=0.85, zorder=5)
         mel_areas.append(poly.area)
 
-        # Nucleation star
-        cx, cy = poly.centroid.x, poly.centroid.y
+        # Nucleation star — use cluster centroid if provided, else polygon centroid
+        if trigger_centroids is not None and i < len(trigger_centroids):
+            cx, cy = trigger_centroids[i]
+        else:
+            cx, cy = poly.centroid.x, poly.centroid.y
         ax.plot(cx, cy, marker='*', markersize=14, color=color,
                 markeredgecolor='white', markeredgewidth=0.8, zorder=10)
 

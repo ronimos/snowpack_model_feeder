@@ -8,9 +8,9 @@ Steps (run after SNOWPACK finishes and Zarr cache is available):
 
 Usage:
     python analysis_pipeline.py zarr_build
-    python analysis_pipeline.py analyze --snapshot-date 2026-01-17
-    python analysis_pipeline.py scenarios --snapshot-date 2026-01-17
-    python analysis_pipeline.py all --snapshot-date 2026-01-17
+    python analysis_pipeline.py analyze --snapshot-date 2026-01-18
+    python analysis_pipeline.py scenarios --snapshot-date 2026-01-18
+    python analysis_pipeline.py all --snapshot-date 2026-01-18
 
 Requires Pipeline A (pipeline.py) to have been run first to produce:
     outputs/analysis/cluster_map.npy
@@ -61,7 +61,7 @@ from scenario_writer import (
 # Defaults — path and parameter defaults are in config.py.
 # Only the snapshot date stays here (event-specific CLI default).
 # ---------------------------------------------------------------------------
-DEFAULT_SNAPSHOT = "2026-01-17"
+DEFAULT_SNAPSHOT = "2026-01-18"  # YYYY-MM-DD
 
 
 # ---------------------------------------------------------------------------
@@ -273,8 +273,11 @@ def step_scenarios(cfg, args):
     mel_csv = mel_csv_all if mel_csv_all.exists() else mel_csv_grp
 
     snap_features = pd.read_csv(str(feat_csv), index_col=0)
+    snap_features = snap_features[~snap_features.index.duplicated(keep='first')]
     meloche_df    = pd.read_csv(str(mel_csv),  index_col=0) \
                    if mel_csv.exists() else pd.DataFrame()
+    if not meloche_df.empty:
+        meloche_df = meloche_df[~meloche_df.index.duplicated(keep='first')]
     print(f"  Features: {len(snap_features)} clusters from {feat_csv.name}")
     print(f"  Meloche:  {len(meloche_df)} clusters from {mel_csv.name}")
 
@@ -283,9 +286,11 @@ def step_scenarios(cfg, args):
     # Group assignment (release/adjacent/reference) is for validation
     # comparison, NOT for trigger selection — operationally we don't know
     # which clusters will be in the release area.
-    MIN_TAU_G   = 50.0   # Pa — below this the scaling law is not applicable
+    MIN_TAU_G   = 40.0   # Pa — below this the scaling law is not applicable
     MIN_SLOPE   = 30.0   # degrees — well above the 27° friction angle
-    MAX_SK38    = 0.5    # Sk38 >= 0.5 means terrain is stable — not a valid trigger
+    MAX_SK38    = 1.0    # Sk38 >= 1.0 = stable for skier triggering (Schweizer & Jamieson 2007)
+    MIN_SLAB_THICKNESS = 0.5  # metres — too thin = D1 at most
+    MAX_SLAB_THICKNESS = args.max_slab_thickness  # metres — too thick = skier can't trigger
 
     # All clusters that overlap the start zone mask
     sz_cids = set(int(c) for c in np.unique(cluster_map[start_zone_mask])
@@ -327,7 +332,14 @@ def step_scenarios(cfg, args):
               f"slope >= {MIN_SLOPE_TRIGGER:.1f}°, "
               f"Sk38 < {MAX_SK38} filter: "
               f"{len(candidate_ids)}")
-
+        candidate_ids = [
+            cid for cid in candidate_ids
+            if ((_scalar_val(snap_features, cid, 'slab_thickness') >= MIN_SLAB_THICKNESS
+                 and _scalar_val(snap_features, cid, 'slab_thickness') <= MAX_SLAB_THICKNESS)
+                or np.isnan(_scalar_val(snap_features, cid, 'slab_thickness')))
+        ]
+        print(f"  Candidates after slab_thickness {MIN_SLAB_THICKNESS}-{MAX_SLAB_THICKNESS}m filter: "
+            f"{len(candidate_ids)}")
     # Optional: restrict to observed release area (validation mode only)
     if args.restrict_to_release_area:
         from snowpack_analysis import geojson_to_mask
@@ -368,6 +380,45 @@ def step_scenarios(cfg, args):
     sk38_col = 'min_sk38' if 'min_sk38' in cand_df.columns else 'sk38_min'
     triggers = (cand_df.dropna(subset=[sk38_col])
                        .nsmallest(args.n_triggers, sk38_col))
+
+    # Validate triggers: drop any that can't produce a release polygon
+    # Test with median size_factor — if it fails at median, it fails at all
+    if not args.use_observed_release and not args.no_propagation:
+        valid_triggers = []
+        _mid_sf = args.size_factors[len(args.size_factors) // 2]
+        for t_cid_check in triggers.index:
+            _a_ca_check = 50.0
+            if not meloche_df.empty and t_cid_check in meloche_df.index:
+                _v = meloche_df.loc[t_cid_check, 'A_ca_brittle']
+                if isinstance(_v, pd.Series): _v = _v.iloc[0]
+                if not np.isnan(float(_v)):
+                    _a_ca_check = min(float(_v), 300.0)
+            _poly_check = make_release_polygon_2d(
+                trigger_cluster_id=t_cid_check,
+                A_ca=_a_ca_check,
+                meloche_df=meloche_df,
+                cluster_map=cluster_map,
+                dem=dem,
+                transform=transform,
+                start_zone_mask=start_zone_mask,
+                snap_features=snap_features,
+                size_factor=_mid_sf,
+                stauchwall_deg=args.stauchwall_deg,
+                mode3_scale=args.mode3_scale,
+                use_propagation=True,
+            )
+            if _poly_check is not None:
+                valid_triggers.append(t_cid_check)
+            else:
+                print(f"  Dropped trigger cid={t_cid_check} — "
+                      f"propagate_release returned None at "
+                      f"size_factor={_mid_sf}")
+        if valid_triggers:
+            triggers = triggers.loc[valid_triggers]
+        else:
+            print("  WARNING: all triggers failed propagation — "
+                  "keeping original set with rectangle fallback")
+
     print(f"Trigger clusters: {list(triggers.index)} "
           f"Sk38={list(triggers[sk38_col].round(3))}")
 
@@ -450,8 +501,8 @@ def step_scenarios(cfg, args):
                 print(f"    scour_depth: hand_hardness not in Zarr dataset")
             else:
                 try:
-                    hh = ds_t['hand_hardness'].values
-                    hs_cm = float(ds_t['HS'].values)
+                    hh = ds_t['hand_hardness'].values.ravel()
+                    hs_cm = float(np.nanmean(ds_t['HS'].values))
                     n_layers = len(hh)
 
                     # SNOWPACK hand hardness uses negative values:
@@ -470,7 +521,12 @@ def step_scenarios(cfg, args):
                     if z_var is None:
                         print(f"    scour_depth: no height variable found")
                     else:
-                        z = ds_t[z_var].values  # cm, from ground, per layer
+                        z = ds_t[z_var].values.ravel()  # cm, per layer
+                        # Ensure z and hh have same length
+                        n_layers = min(len(hh), len(z))
+                        hh = hh[:n_layers]
+                        z = z[:n_layers]
+                        has_hh = has_hh[:n_layers]
 
                         # Get slab thickness = depth from surface to failure plane
                         slab_thick_m = None
@@ -676,6 +732,18 @@ def step_scenarios(cfg, args):
         obs_poly   = _load_observed_release_polygon(cfg)
         poly_pairs = [(p, sf) for p, sf, _ in median_polygons]
         t_labels   = [lbl for _, _, lbl in median_polygons]
+
+        # Compute trigger centroids from cluster_map (stable position)
+        t_centroids = []
+        for t_cid_plot in triggers.index:
+            px = np.argwhere(cluster_map == t_cid_plot)
+            if len(px):
+                cx = transform.c + px[:, 1].mean() * transform.a
+                cy = transform.f + px[:, 0].mean() * transform.e
+                t_centroids.append((cx, cy))
+            else:
+                t_centroids.append(None)
+
         plot_release_comparison(
             meloche_polygons = poly_pairs,
             observed_polygon = obs_poly,
@@ -683,6 +751,7 @@ def step_scenarios(cfg, args):
             transform        = transform,
             start_zone_mask  = start_zone_mask,
             trigger_labels   = t_labels,
+            trigger_centroids = t_centroids,
             out_path         = plot_path,
             title            = (f"Release polygon comparison — {args.snapshot_date} | "
                                f"Little Professor | Jan 18 event\n"
@@ -746,6 +815,10 @@ def main():
     parser.add_argument('--mu',            type=float, default=None)
     parser.add_argument('--xi',            type=float, default=None)
     parser.add_argument('--stauchwall-deg',type=float, default=None)
+    parser.add_argument('--max-slab-thickness', type=float, default=1.5,
+                        help='Maximum slab thickness for skier trigger (m). '
+                             'Use 10.0 for natural trigger scenarios. '
+                             'Default 1.5 (skier stress negligible below ~1.5m).')
     parser.add_argument('--mode3-scale',   type=float, default=1.5,
                         help='Lateral arrest multiplier on trigger Pi1 '
                              '(default 1.5, must be > 1.0). Higher = '
@@ -800,4 +873,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    

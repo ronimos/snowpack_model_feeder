@@ -16,7 +16,7 @@ Called from forcing_pipeline.py as step_reinit(), or standalone:
     python src/snowpack-model-feeder/reinitialize_snowpack.py \
         --date-before 2026-01-14 --date-after 2026-01-20 \
         --event-date 2026-01-18 \
-        --snapshot-date 2026-01-17
+        --snapshot-date 2026-01-18
 
     # Dry run
     python src/snowpack-model-feeder/reinitialize_snowpack.py \
@@ -193,7 +193,7 @@ def run_reinit(cfg,
                date_after: str = '2026-01-20',
                event_date: str = '2026-01-18',
                event_time: str = '12:00:00',
-               snapshot_date: str = '2026-01-17',
+               snapshot_date: str = '2026-01-18',
                release_geojson: str = None,
                kernel_size: int = 7,
                threshold_sigma: float = 1.2,
@@ -443,7 +443,7 @@ def main():
     ap.add_argument('--date-after', default='2026-01-20')
     ap.add_argument('--event-date', default='2026-01-18')
     ap.add_argument('--event-time', default='12:00:00')
-    ap.add_argument('--snapshot-date', default='2026-01-17')
+    ap.add_argument('--snapshot-date', default='2026-01-18')
     ap.add_argument('--release-geojson', default=None)
     ap.add_argument('--kernel-size', type=int, default=7)
     ap.add_argument('--threshold-sigma', type=float, default=1.2)

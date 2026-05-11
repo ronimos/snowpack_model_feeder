@@ -10,9 +10,9 @@ physics model plot (_physical_model) from analysis_pipeline.py.
 
 Usage:
   python src/snowpack-model-feeder/probabilistic_release.py \
-      --snapshot-date 2026-01-17 \
+      --snapshot-date 2026-01-18 \
       --trigger-cid 3178 \
-      --model outputs/models/boundary_model_2026-01-17.pkl \
+      --model outputs/models/boundary_model_2026-01-18.pkl \
       --propagate-threshold 0.4
 """
 
