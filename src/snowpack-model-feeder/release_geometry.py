@@ -426,10 +426,19 @@ def propagate_release(
         A_ca: Optional[float] = None,
         snap_features: 'Optional[pd.DataFrame]' = None,
         k_neighbours: int = 8,
-        max_clusters: int = 500):
+        max_clusters: int = 500,
+        wave_callback=None):
     """
     Identify release zone as the connected region of clusters with
     Pi1 >= Pi1_trigger that is reachable from the trigger cluster.
+
+    Parameters
+    ----------
+    wave_callback : callable, optional
+        If provided, called once per BFS ring with signature:
+            wave_callback(ring_idx, propagated_cids, arrested_list)
+        where arrested_list is a list of {'cid': int, 'reason': str}.
+        Used by animate_propagation.py for ring-level visualisation.
 
     Physical basis (Gaume et al. 2015, Meloche et al. 2025):
       - Pi1 = tau_g / (theta * Lambda * sqrt(1+delta))
@@ -598,38 +607,21 @@ def propagate_release(
     def _qualifies(cid, current_props):
         """
         Does this cluster qualify for crack propagation?
-
-        Uses LOCAL GRADIENT arrest: checks property change from current
-        propagating cluster to candidate neighbor. A sharp discontinuity
-        arrests the crack regardless of absolute property values.
-
-        Arrest conditions:
-          1. Outside start zone KML (hard boundary)
-          2. Distance cap: upslope > A_ca, downslope > stauchwall
-          3. Downslope slope < 28° (terrain)
-          4. tau_g < MIN_PROPAGATION_TAU_G (absolute floor, slab too thin/flat)
-          5. tau_g < trigger_tau_g × TAU_G_DROP_FACTOR (relative drop,
-             downslope/lateral only — upslope driven by elastic energy)
-          6. slab_thickness < MIN_PROPAGATION_SLAB (slab too thin to sustain
-             crack — K_I ∝ √h drops below K_Ic)
-          7. Lambda < MIN_PROPAGATION_LAMBDA (slab too weak/compliant —
-             primary slab-strength arrest, especially cross-slope)
-          8. |ΔΛ/Λ| > LAMBDA_JUMP_FACTOR: sharp slab discontinuity
-          9. |Δh/h| > THICKNESS_JUMP_FACTOR: sharp slab thickness change
+        Returns (True, 'propagated') or (False, reason_string).
         """
         # Hard boundary: start zone KML
         if start_zone_mask is not None:
             px = np.argwhere(cluster_map == cid)
             if len(px) == 0:
-                return False
+                return False, 'no_data'
             r, c = int(px.mean(axis=0)[0]), int(px.mean(axis=0)[1])
             if not start_zone_mask[r, c]:
-                return False
+                return False, 'outside_start_zone'
 
         # Direction and distance from trigger
         xy = centroids.get(cid)
         if xy is None:
-            return False
+            return False, 'no_data'
         asp_rad        = np.radians(t_aspect)
         fall_x, fall_y = np.sin(asp_rad), np.cos(asp_rad)
         dx, dy         = xy[0] - t_x, xy[1] - t_y
@@ -639,89 +631,68 @@ def propagate_release(
         is_downslope = dot >  0.707
         is_upslope   = dot < -0.707
 
-        # Distance caps: upslope A_ca, downslope stauchwall
-        if is_upslope   and dist > d_up:   return False
-        if is_downslope and dist > d_down: return False
+        # Distance caps: upslope A_ca, downslope stauchwall, lateral Gaume width
+        if is_upslope   and dist > d_up:   return False, 'upslope_distance_cap'
+        if is_downslope and dist > d_down: return False, 'downslope_distance_cap'
+        if not is_upslope and not is_downslope and dist > d_lat:
+            return False, 'lateral_distance_cap'
 
         # Downslope terrain threshold
         if is_downslope and _mean_slope(cid) < stauchwall_deg:
-            return False
+            return False, 'stauchwall_slope'
 
         # Minimum tau_g — slab must be thick/steep enough to sustain crack
         nbr_props = _get_props(cid)
         tau_g_nbr = nbr_props.get('tau_g', np.nan)
         if not np.isnan(tau_g_nbr) and tau_g_nbr < MIN_PROPAGATION_TAU_G:
-            return False
+            return False, 'low_tau_g'
 
-        # Relative tau_g arrest — driving stress dropped significantly
-        # from trigger value. Captures terrain transitions (steeper/loaded
-        # release zone → flatter/thinner adjacent slope).
-        # Only applied downslope and laterally — upslope propagation is
-        # driven by stored elastic energy, not local tau_g, and naturally
-        # has lower tau_g as terrain flattens toward the ridge.
+        # Relative tau_g arrest — downslope and lateral only
         if not is_upslope and not np.isnan(tau_g_nbr) \
                 and tau_g_nbr < tau_g_relative_floor:
-            return False
+            return False, 'tau_g_relative_drop'
 
-        # Minimum slab thickness — crack can't propagate into terrain
-        # where the slab is too thin to sustain fracture. The crack tip
-        # stress intensity factor K_I ∝ √h: thin slab → K_I < K_Ic → arrest.
-        # This is the physical mechanism for lateral and downslope arrest
-        # at terrain transitions where the slab pinches out.
+        # Minimum slab thickness
         h_nbr = nbr_props.get('slab_thickness', np.nan)
         if not np.isnan(h_nbr) and h_nbr < MIN_PROPAGATION_SLAB:
-            return False
+            return False, 'thin_slab'
 
-        # Minimum Lambda — slab too weak/compliant to transmit fracture.
-        # Λ integrates slab thickness, elastic modulus, and WL shear
-        # modulus: a thin stiff slab can still propagate (high Λ),
-        # a thick soft slab may not (low Λ). This is the primary
-        # slab-strength arrest criterion for cross-slope propagation.
+        # Minimum Lambda — slab too weak/compliant
         lam_nbr_abs = nbr_props.get('Lambda', np.nan)
         if not np.isnan(lam_nbr_abs) and lam_nbr_abs < MIN_PROPAGATION_LAMBDA:
-            return False
+            return False, 'low_lambda'
 
-        # LOCAL GRADIENT ARREST — compare neighbor to current propagating cluster
-        # (not to trigger). Detects sharp slab edges and Λ discontinuities.
-
-        # Slab property discontinuity arrest (Λ and thickness)
-        # Physical basis: crack arrests at ANY sharp slab discontinuity —
-        # both stiffening (higher Λ redistributes energy over longer length)
-        # and softening (lower Λ reduces stress concentration at crack tip,
-        # dropping K_I below K_Ic). Criterion: |ΔΛ/Λ| > threshold.
-        # Same logic applies to slab thickness h.
+        # Lambda jump (local gradient)
         lam_current = current_props.get('Lambda', np.nan)
         lam_nbr     = nbr_props.get('Lambda', np.nan)
         if (not np.isnan(lam_current) and not np.isnan(lam_nbr)
                 and lam_current > 0):
             rel_change = abs(lam_nbr - lam_current) / lam_current
             if rel_change > LAMBDA_JUMP_FACTOR * size_factor:
-                return False
+                return False, 'lambda_discontinuity'
 
-        # Slab thickness: arrest on sharp change in either direction
+        # Slab thickness jump (local gradient)
         h_current = current_props.get('slab_thickness', np.nan)
-        # h_nbr already fetched above for absolute cap
         if (not np.isnan(h_current) and not np.isnan(h_nbr)
                 and h_current > 0):
             rel_change = abs(h_nbr - h_current) / h_current
             if rel_change > THICKNESS_JUMP_FACTOR * size_factor:
-                return False
+                return False, 'thickness_discontinuity'
 
-        return True
+        return True, 'propagated'
 
     # Gradient arrest thresholds — relative change in either direction
-    # LAMBDA_JUMP_FACTOR:    arrest if |ΔΛ/Λ| > 0.15 (15% change in either direction)
-    # THICKNESS_JUMP_FACTOR: arrest if |Δh/h|  > 0.15 (15% change in either direction)
+    # LAMBDA_JUMP_FACTOR:    arrest if |ΔΛ/Λ| > 0.5 (50% change in either direction)
+    # THICKNESS_JUMP_FACTOR: arrest if |Δh/h|  > 0.25 (25% change in either direction)
     # TAU_G_DROP_FACTOR:     arrest if neighbor tau_g < trigger_tau_g × factor
     # size_factor multiplies threshold → larger size_factor = more tolerant = larger release
     LAMBDA_JUMP_FACTOR    = 0.15
     THICKNESS_JUMP_FACTOR = 0.15
-    TAU_G_DROP_FACTOR     = 0.50   # arrest when tau_g drops below 50% of trigger's
-    MIN_PROPAGATION_SLAB  = 0.40   # m — slab too thin to sustain crack propagation
+    TAU_G_DROP_FACTOR     = 0.60   # arrest when tau_g drops below 50% of trigger's
+    MIN_PROPAGATION_SLAB  = 0.50   # m — slab too thin to sustain crack propagation
     MIN_PROPAGATION_LAMBDA = 0.5   # m — slab too weak/compliant to transmit fracture
                                    # Λ = √(E×h³ / (12×G_wl×D_wl)): integrates
                                    # slab thickness, stiffness, and WL properties
-   
 
     # Relative tau_g floor: arrest when driving stress drops significantly
     # from the trigger's value. This captures the 2.3× tau_g contrast
@@ -733,27 +704,49 @@ def propagate_release(
         tau_g_relative_floor = MIN_PROPAGATION_TAU_G  # fallback to absolute
 
     # --- Flood-fill from trigger through qualifying clusters ---
-    if not _qualifies(trigger_cluster_id, trigger_props):
+    qual_ok, qual_reason = _qualifies(trigger_cluster_id, trigger_props)
+    if not qual_ok:
         pxs_t = np.argwhere(cluster_map == trigger_cluster_id)
         if len(pxs_t) == 0:
             return None, set()
 
     failed         = {trigger_cluster_id}
-    cluster_props  = {trigger_cluster_id: trigger_props}  # track per-cluster props
-    frontier       = deque([trigger_cluster_id])
+    cluster_props  = {trigger_cluster_id: trigger_props}
     visited        = {trigger_cluster_id}
 
-    while frontier and len(failed) < max_clusters:
-        current       = frontier.popleft()
-        current_props = cluster_props.get(current, trigger_props)
-        for nbr in neighbours.get(current, []):
-            if nbr in visited:
-                continue
-            visited.add(nbr)
-            if _qualifies(nbr, current_props):
-                failed.add(nbr)
-                cluster_props[nbr] = _get_props(nbr)
-                frontier.append(nbr)
+    # Ring-by-ring BFS for wave_callback support
+    current_ring = [trigger_cluster_id]
+    ring_idx = 0
+
+    if wave_callback is not None:
+        wave_callback(0, [trigger_cluster_id], [])
+
+    while current_ring and len(failed) < max_clusters:
+        ring_idx += 1
+        next_ring = []
+        ring_arrested = []
+
+        for current in current_ring:
+            current_props = cluster_props.get(current, trigger_props)
+            for nbr in neighbours.get(current, []):
+                if nbr in visited:
+                    continue
+                visited.add(nbr)
+                qualifies, reason = _qualifies(nbr, current_props)
+                if qualifies:
+                    failed.add(nbr)
+                    cluster_props[nbr] = _get_props(nbr)
+                    next_ring.append(nbr)
+                else:
+                    ring_arrested.append({'cid': nbr, 'reason': reason})
+
+        if not next_ring and not ring_arrested:
+            break
+
+        if wave_callback is not None:
+            wave_callback(ring_idx, next_ring, ring_arrested)
+
+        current_ring = next_ring
 
     # Debug direction breakdown
     dir_counts = {'upslope': 0, 'downslope': 0, 'lateral': 0, 'other': 0}
