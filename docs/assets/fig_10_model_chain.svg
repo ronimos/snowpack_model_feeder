@@ -1,0 +1,81 @@
+<svg width="100%" viewBox="0 0 680 620" xmlns="http://www.w3.org/2000/svg" style="font-family: system-ui, -apple-system, sans-serif; background: white;">
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+
+<!-- Row 1: Data inputs -->
+<rect x="40" y="30" width="160" height="56" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="120" y="50" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#0C447C">UAS surveys</text>
+<text x="120" y="68" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#185FA5">5 cm snow depth maps</text>
+
+<rect x="260" y="30" width="160" height="56" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="340" y="50" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#0C447C">Weather stations</text>
+<text x="340" y="68" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#185FA5">Hourly CAABT/CAABM</text>
+
+<rect x="480" y="30" width="160" height="56" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="560" y="50" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#0C447C">Bare-ground DEM</text>
+<text x="560" y="68" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#185FA5">Nov 10, 2025</text>
+
+<!-- Arrows to feeder -->
+<line x1="120" y1="86" x2="120" y2="130" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="340" y1="86" x2="340" y2="130" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M560 86 L560 120 L430 120 L430 130" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+<!-- snowpack-model-feeder -->
+<rect x="40" y="130" width="520" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text x="300" y="150" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#085041">snowpack-model-feeder</text>
+<text x="300" y="168" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#0F6E56">resample → transport → cluster → gap_fill → SMET files</text>
+
+<line x1="300" y1="186" x2="300" y2="230" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+<!-- CAIC API -->
+<rect x="580" y="150" width="90" height="44" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="625" y="172" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#444441">CAIC API</text>
+<path d="M580 172 L570 172 L570 200 L475 200 L475 230" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+<!-- SNOWPACK -->
+<rect x="120" y="230" width="360" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+<text x="300" y="250" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#3C3489">Distributed SNOWPACK</text>
+<text x="300" y="268" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#534AB7">~6,600 cluster simulations → Zarr store</text>
+
+<line x1="300" y1="286" x2="300" y2="330" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+<!-- WL detection -->
+<rect x="60" y="330" width="210" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+<text x="165" y="350" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#3C3489">WL detection</text>
+<text x="165" y="368" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#534AB7">Grain-type interface, Sk38</text>
+
+<!-- Meloche features -->
+<rect x="330" y="330" width="210" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+<text x="435" y="350" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#3C3489">Meloche features</text>
+<text x="435" y="368" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#534AB7">τ_g, Λ, θ, A_ca per cluster</text>
+
+<!-- Arrows to release -->
+<path d="M165 386 L165 420 L260 420 L260 430" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M435 386 L435 420 L340 420 L340 430" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+<!-- Release area -->
+<rect x="120" y="430" width="360" height="56" rx="8" fill="#FAECE7" stroke="#993C1D" stroke-width="0.5"/>
+<text x="300" y="450" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#712B13">Release area geometry</text>
+<text x="300" y="468" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#993C1D">BFS crack propagation → polygon + depth raster</text>
+
+<line x1="300" y1="486" x2="300" y2="530" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+<!-- com1DFA -->
+<rect x="120" y="530" width="360" height="56" rx="8" fill="#FAECE7" stroke="#993C1D" stroke-width="0.5"/>
+<text x="300" y="550" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#712B13">com1DFA flow simulation</text>
+<text x="300" y="568" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#993C1D">75 scenarios → runout probability envelope</text>
+
+<!-- P(road) output -->
+<rect x="520" y="530" width="140" height="56" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.5"/>
+<text x="590" y="550" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#633806">P(road impact)</text>
+<text x="590" y="568" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#854F0B">Hazard forecast</text>
+<line x1="480" y1="558" x2="518" y2="558" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+<!-- Reinit feedback -->
+<text x="595" y="310" text-anchor="middle" font-size="12" fill="#888780">Avalanche</text>
+<text x="595" y="324" text-anchor="middle" font-size="12" fill="#888780">reinit</text>
+<path d="M590 335 L590 258 L482 258" fill="none" stroke="#888780" stroke-width="0.5" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+</svg>
