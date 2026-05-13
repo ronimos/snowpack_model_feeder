@@ -9,9 +9,17 @@
 
 ## 1. Problem Statement
 
-Colorado's mountain highways cross dozens of avalanche paths where closures cost $50K–200K per event in traffic delays, crew overtime, and economic disruption. Current avalanche operations are reactive: roads close after conditions deteriorate, leaving limited lead time for planning crews, equipment, and traffic management. Avalanche forecasting in the US relies on regional danger ratings and expert judgment — there is no operational system that provides path-specific, quantitative hazard forecasts with the spatial resolution needed for infrastructure decisions.
+Colorado's mountain highways cross dozens of avalanche paths managed by dedicated highway avalanche programs. These programs are proactive: experienced forecasters assess specific paths using weather observations, snowpit data, and decades of institutional knowledge, then conduct active mitigation — artillery, explosives, and helicopter delivery — to control avalanche hazard before it threatens traffic.
 
-The fundamental question for highway operations is: *will the avalanche reach the road, and when should we act?* Answering this requires knowing where the snowpack is weakest, how much snow will release, and how far the debris will travel — at the specific path, not regionally.
+The challenge is that some avalanche paths have return periods long enough that even experienced forecasters may not have witnessed enough significant cycles on a given path to develop the intuition needed for optimal mitigation timing. This creates two costly failure modes: mitigation triggered too frequently produces unnecessary road closures and wasted resources, while mitigation timed too late or under unfavourable conditions can produce controlled avalanches larger than intended, requiring extended closures for debris removal. Both outcomes impose economic costs and erode operational confidence.
+
+Case example: Bathel, I-70 — March 7, 2019. After two consecutive major storms, CDOT and CAIC avalanche crews conducted mitigation on the Bathel avalanche path above Interstate 70 near Herman Gulch, approximately three miles east of the Eisenhower-Johnson Memorial Tunnel. The first explosive charge triggered a historically large avalanche that buried both directions of the interstate — 15 feet of snow across the westbound lanes, 8 feet on the eastbound side, along with trees and rocks. It took maintenance crews approximately 11 hours to clear the debris and reopen the road. For those 11 hours, a 27-mile stretch of the primary transportation corridor between eastern and western Colorado was closed.
+
+If mitigation teams had access to quantitative information about the snowpack volume in the starting zone and the potential avalanche size from this path before the second storm, they might have chosen to mitigate after the first storm, when the release would have been smaller, the debris more manageable, and the road closure shorter. The Bathel event illustrates the core value of this system: spatial quantification of snowpack conditions and avalanche size potential supports better-timed mitigation decisions, reducing both the magnitude of controlled releases and the duration of road closures.
+
+What's missing is a quantitative, spatially distributed assessment that complements forecaster expertise: how does the snowpack vary across a release zone? Where exactly is the weakest point? How much snow would release under current conditions, and what is the probability that debris reaches the road? These questions require spatial resolution that point observations cannot provide. The system described here is a tool for experienced forecasters, it adds spatial quantification and probabilistic runout estimates to support mitigation timing decisions, particularly on paths where direct observational history is limited.
+
+The fundamental question for highway operations is: will the avalanche reach the road, and when should we act? Answering this requires knowing where the snowpack is weakest, how much snow will release, and how far the debris will travel, at the specific path, not regionally.
 
 ---
 
@@ -37,7 +45,7 @@ The chain is designed for both retrospective validation (did the model predict t
 ## 3. Study Site
 
 ![Fig. 1: Little Professor study site](assets/Little_Professor_image.jpg)  
-*Figure 1: Little Professor avalanche path on the north side of Loveland Pass (satellite imagery, summer). The starting zone is the open alpine terrain in the upper-centre. US-6 is visible as the switchback road at the bottom and right. The A-Basin Administration Building is at the lower right. The avalanche path runs from the starting zone (elev. ~3,750 m) through the gully to US-6 (~3,350 m), a vertical drop of ~400 m.*
+*Figure 1: Little Professor avalanche path on the south side of Loveland Pass (satellite imagery, summer). The starting zone is the open alpine terrain in the upper-centre. US-6 is visible as the switchback road at the bottom and right. The A-Basin Administration Building is at the lower right. The avalanche path runs from the starting zone (elev. ~3,750 m) through the gully to US-6 (~3,350 m), a vertical drop of ~400 m.*
 
 Little Professor is a southeast-facing (aspect ~138°) avalanche path on the north side of Loveland Pass, directly above US-6. The starting zone spans elevations of approximately 3,650–3,750 m with slope angles of 25–45°. A flat northwest-facing fetch area above the starting zone provides a wind-loading source that builds deep wind slabs on the upper slope.
 
