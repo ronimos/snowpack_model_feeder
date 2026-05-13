@@ -2,9 +2,9 @@
 
 ## **1\. Introduction:**
 
-On March 7, 2019, avalanche mitigation work above Interstate 70 near Herman Gulch, Colorado, triggered a historically large avalanche on the Bathel avalanche path. Following two consecutive major storm cycles, Colorado Department of Transportation (CDOT) and Colorado Avalanche Information Center (CAIC) crews conducted control work above the interstate using explosive charges. The first shot released enough snow, trees, and rock debris to bury both directions of I-70, closing one of Colorado’s primary transportation corridors for approximately 11 hours while crews removed debris from the roadway.
+On March 5, 2019, avalanche mitigation work above Interstate 70 near Herman Gulch, Colorado, triggered a historically large avalanche on the Bathel avalanche path. Following two consecutive major storm cycles, Colorado Department of Transportation (CDOT) and Colorado Avalanche Information Center (CAIC) crews conducted control work above the interstate using explosive charges. The first shot released enough snow, trees, and rock debris to bury both directions of I-70, closing one of Colorado’s primary transportation corridors for approximately 11 hours while crews removed debris from the roadway.
 
-The Bathel event highlighted one of the central operational challenges in highway avalanche forecasting: determining not only whether a slope is unstable, but how much snow is likely to release and whether the resulting avalanche will reach the road. Prior to March 7, uncertainty in the spatial distribution of snow loading and instability within the Bathel starting zone often resulted in mitigation missions that produced little or no avalanche activity. While these “no-result” missions are operationally preferable to large uncontrolled or oversized releases, they still require road closures, personnel, explosives, aircraft support, and significant operational coordination. The challenge for avalanche programs is therefore not simply identifying instability, but optimizing mitigation timing to reduce both unnecessary operational impacts and the likelihood of unusually large releases.
+The Bathel event highlighted one of the central operational challenges in highway avalanche forecasting: determining not only whether a slope is unstable, but how much snow is likely to release and whether the resulting avalanche will reach the road. Prior to March 5, uncertainty in the spatial distribution of snow loading and instability within the Bathel starting zone often resulted in mitigation missions that produced little or no avalanche activity. While these “no-result” missions are operationally preferable to large uncontrolled or oversized releases, they still require road closures, personnel, explosives, aircraft support, and significant operational coordination. The challenge for avalanche programs is therefore not simply identifying instability, but optimizing mitigation timing to reduce both unnecessary operational impacts and the likelihood of unusually large releases.
 
 Colorado’s mountain highways cross dozens of avalanche paths managed by CAIC and CDOT highway avalanche programs. These programs rely on experienced forecasters who integrate weather observations, snowpack assessments, field observations, and years of institutional knowledge to make mitigation decisions. Yet even highly experienced teams face a fundamental limitation: avalanche forecasting at the scale of individual starting zones remains constrained by long return periods and sparse spatial information. Snowpit observations and weather stations provide critical point measurements, but they cannot fully describe how snow depth, loading, and instability vary across complex terrain.
 
@@ -317,13 +317,13 @@ tau\_g provides the strongest spatial discrimination. S’ and profile-wide min 
 
 | Document | Contents |
 | :---- | :---- |
-| release\_area\_geometry.md | Complete release area method: trigger selection, BFS arrest criteria, probabilistic model, calibrated parameters, validation |
-| operational\_design.md | Operational architecture: daily forward mode, NWP forecasts, survey correction, efficiency, cluster management, monitoring, performance reporting |
-| avalanche\_handling.md | Avalanche detection (min-kernel vs Canny+watershed), SNOWPACK reinitialization workflow, transport correction |
-| TRANSPORT\_MODELS.md | Snow transport model: wind-energy disaggregation, RF regression, gap filling |
-| clustering.md | Cluster algorithm: PCA \+ K-means \+ recursive splitting \+ contiguity enforcement |
-| TODO.md | Prioritized task list with operational mode, NWP forecast, cluster management, P\_unstable evaluation |
-| 25\_26\_Season\_Survey\_Data\_Quality\_Review.pdf | Season-wide UAS survey audit: co-registration, cross-flight repeatability, probe comparison, outlier analysis, summer 2026 field plan |
+| [release\_area\_geometry.md](https://github.com/ronimos/snowpack_model_feeder/blob/main/docs/release_area_geometry.md) | Complete release area method: trigger selection, BFS arrest criteria, probabilistic model, calibrated parameters, validation |
+| [operational\_design.md](https://github.com/ronimos/snowpack_model_feeder/blob/main/docs/operational_mode_design_concept.md) | Operational architecture: daily forward mode, NWP forecasts, survey correction, efficiency, cluster management, monitoring, performance reporting |
+| [avalanche\_handling.md](https://github.com/ronimos/snowpack_model_feeder/blob/main/docs/avalanche_handling.md) | Avalanche detection (min-kernel vs Canny+watershed), SNOWPACK reinitialization workflow, transport correction |
+| [TRANSPORT\_MODELS.md](https://github.com/ronimos/snowpack_model_feeder/blob/main/docs/TRANSPORT_MODELS.md) | Snow transport model: wind-energy disaggregation, RF regression, gap filling |
+| [clustering_methods.md](https://github.com/ronimos/snowpack_model_feeder/blob/main/docs/clustering_methods.md) | Cluster algorithm: PCA \+ K-means \+ recursive splitting \+ contiguity enforcement |
+| [TODO.md](https://github.com/ronimos/snowpack_model_feeder/blob/main/docs/TODO.md) | Prioritized task list with operational mode, NWP forecast, cluster management, P\_unstable evaluation |
+| [25\_26\_Season\_Survey\_Data\_Quality\_Review](https://docs.google.com/document/d/1DFycZZoSKWsxT0hdTxou3pjii2yyaE8fn0TB8G-yJTg/edit?usp=sharing) | Season-wide UAS survey audit: co-registration, cross-flight repeatability, probe comparison, outlier analysis, summer 2026 field plan |
 
 ---
 
