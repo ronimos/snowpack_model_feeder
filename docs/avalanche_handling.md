@@ -17,7 +17,7 @@ Avalanche events create two problems for the pipeline:
 
 This document covers the detection methods, the reinitialization workflow, and how to run the pipeline when avalanche events are present.
 
-![January 18, 2026 D2 slab avalanche on Little Professor](assets/fig_jan18_avalanche_photo.png)
+![January 18, 2026 D2 slab avalanche on Little Professor](assets/fig_09_jan18_avalanche_photo.png)
 
 January 18, 2026 skier-triggered D2 slab avalanche on the Little Professor path, viewed from Loveland Ski Area. The release area is visible in the upper start zone, with the track running through sparse timber and the deposit terminating above US Highway 6.
 
