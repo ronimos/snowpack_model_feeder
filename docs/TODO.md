@@ -1,6 +1,6 @@
 # Little Professor Pipeline — TODO
 
-**Updated:** 2026-04-20  
+**Updated:** 2026-05-15  
 **Context:** UAS → distributed SNOWPACK → release geometry → com1DFA runout probability
 
 ---
@@ -11,7 +11,7 @@
 
 - [ ] **Spatially distributed scour depth raster** — currently `scour_depth_m` is extracted only at the trigger cluster and applied uniformly across the path. com1DFA supports an entrainable-depth raster where each cell holds its own scour cap. To build this: run the failure-plane-to-hard-layer scan (same logic as the trigger extraction in `step_scenarios`) for every cluster in the domain, paint the result onto the 1 m grid, and write as a GeoTIFF alongside `depth.tif`. This would capture spatial variability in how much old snow the avalanche can entrain — e.g., thinner entrainable layer on wind-scoured ridges, thicker in sheltered terrain. **Blocked by:** com1DFA entrainable-depth raster input bug (may be config issue). Revisit once the raster input path is working.
 
-- [ ] **Run observed-release validation for Val (AvaFrame)**
+- [x] **Run observed-release validation for Val (AvaFrame)**
   ```bash
   python src/snowpack-model-feeder/analysis_pipeline.py scenarios \
       --snapshot-date 2026-01-17 --n-triggers 1 \
@@ -26,9 +26,9 @@
   **Dependency:** requires the observed-release validation run and the US-6 road polygon to also evaluate P(exceedance) sensitivity to μ/ξ.  
   **Note for multi-path extension:** μ/ξ are path-specific. Calibration on Little Professor does not transfer directly to Seven Sisters or Muleshoe — each path needs its own calibration against observed events or must use literature defaults with wider uncertainty bounds.
 
-- [ ] **US-6 road polygon** for P(exceedance) calculation at infrastructure.
+- [x] **US-6 road polygon** for P(exceedance) calculation at infrastructure.
 
-- [ ] **Confirm AvaFrame version** supports raster depth input format.
+- [x] **Confirm AvaFrame version** supports raster depth input format.
 
 ---
 
@@ -36,15 +36,15 @@
 
 - [ ] **Couple `scenarios` step to run both physical and probabilistic models** — add `--probabilistic` flag to `analysis_pipeline.py scenarios` that calls `probabilistic_release.py` for each trigger cluster after physical scenarios are written. Produces `release_comparison_YYYY-MM-DD_probability_model.png` alongside `_physical_model.png`.
 
-- [ ] **Probabilistic model → AvaFrame scenario set** — integrate probabilistic release polygons as additional scenarios in the com1DFA ensemble. Weights derived from P(arrest) distributions rather than Sk38-based weights. This propagates release zone uncertainty through to runout probability envelopes, enabling the full probabilistic decision-support chain:
+- [x] **Probabilistic model → AvaFrame scenario set** — integrate probabilistic release polygons as additional scenarios in the com1DFA ensemble. Weights derived from P(arrest) distributions rather than Sk38-based weights. This propagates release zone uncertainty through to runout probability envelopes, enabling the full probabilistic decision-support chain:
   ```
   P(release boundary) × P(runout | release) = P(exceedance at road)
   ```
   Currently the probabilistic model produces comparison plots only.
 
-- [ ] **`--restrict-to-release-area` validation run** — confirm trigger selection after all filter fixes (Sk38 < 0.5, elevation P75).
+- [x] **`--restrict-to-release-area` validation run** — confirm trigger selection after all filter fixes (Sk38 < 0.75, elevation P75).
 
-- [ ] **Tune size_factor ensemble** against Jan 18 to confirm correct Mel/Obs ratio spread across 0.70–1.30.
+- [x] **Tune size_factor ensemble** against Jan 18 to confirm correct Mel/Obs ratio spread across 0.70–1.30.
 
 - [ ] **Cross-date Meloche analysis** — run scenarios for Jan 10, Jan 14, Jan 17 to confirm Π₁ separation growing toward event. Should show increasing propagation probability as buried WL weakens.
 
@@ -69,17 +69,32 @@
 
 - [ ] **Downslope arrest: direct τ_g < τ_p criterion** — replace 28° slope proxy with direct comparison of distributed τ_g and τ_p from SNOWPACK. Makes stauchwall arrest parameter-free and physically explicit. τ_g and τ_p are both already computed.
 
-- [ ] **Critical cut length** — expose SNOWPACK variable 0606 (critical crack length) via xsnow. Flag to Florian at SLF for xsnow API.
+- [x] **Critical cut length** — ~~expose SNOWPACK variable 0606 (critical crack length) via xsnow~~. Side-loader `add_critical_cut_length.py` reads 0606 directly from `.pro` files and writes `critical_cut_length` into the Zarr. Functional for downstream use. Upstream xsnow API integration (flag to Florian/SLF) still open — see new item below.
 
-- [ ] **Mayer et al. (2022) P_unstable evaluation on Colorado snowpack** — apply the published random forest instability model (400 trees, trained on Swiss Alps data) to our SNOWPACK output and evaluate whether it discriminates between release and adjacent zones in Colorado continental snowpack. The model uses 6 features per layer and is published at `gitlabext.wsl.ch/mayers/random_forest_snow_instability_model`. All 6 input features are available or derivable from the existing Zarr:
-  - `viscous_deformation_rate` (ε̇v) — direct from Zarr
-  - `grain_size` (gs_wl) — direct from Zarr
-  - `sphericity` (sph_wl) — direct from Zarr
-  - `density` / `grain_size` ratio (⟨ρ/gs⟩_sl) — compute from slab layers
-  - Critical cut length (rc) — compute from `shear_strength`, `stress`, elastic length
-  - Skier penetration depth (Pk) — approximate from mean `density` of upper 30cm
-  
-  No SNOWPACK rerun needed. Steps: (1) clone repo, load published RF model, (2) extract 6 features per layer from Zarr at Jan 18 snapshot, (3) apply RF → P_unstable per layer, (4) compare max(P_unstable) between release and adjacent clusters, (5) compare argmax(P_unstable) depth against grain-type WL depth. Note: the current `stab_deformation_rate` variable in the Zarr is S' (structural stability index), NOT P_unstable — the previous comparison in `compare_wl_methods.py` was mislabeled. S' saturates at 6.0 for all Colorado clusters with zero spatial discrimination. The Mayer et al. RF model may perform differently since it integrates 6 features vs a single index. ISSW finding either way: Alpine-trained model tested on continental snowpack.
+- [ ] **Integrate 0606 parsing into `build_zarr_chunked.py`** — currently the side-loader has to run after every Zarr rebuild. Add a `parse_var` pass inside each batch in the builder; concatenate `critical_cut_length` (and likely `0607 rta`) into the xsnow Dataset before write. Removes the need for the side-loader on full rebuilds.
+
+- [ ] **Fix `build_zarr_chunked.py` resume logic** — existing filename-stem skip check (`f.stem.replace('_cluster_', '_')`) doesn't match xsnow's `StationName=` location coord, so every rerun rebuilds from scratch. Read `StationName=` from each `.pro` header and compare against the Zarr's `location` coordinate.
+
+- [x] **Mayer et al. (2022) P_unstable evaluation on Colorado snowpack** — DONE. Pipeline implemented across two envs (main + `.venv-punstable` with sklearn 0.22.1) and documented in `punstable_evaluation_method.md`. Scripts: `extract_punstable_features.py` → `predict_punstable.py` → `ingest_punstable_to_zarr.py`. Spatial validation against Jan 18 release-area vs adjacent skied-but-not-triggered terrain via `validate_punstable_spatial.py` and `plot_punstable_distributions.py`.
+
+  **Summary of findings:**
+  - Internal validation: model picks basal FC/DH as the worst layer at 99.9% of clusters (95.6% FC, 4.3% DH) — Colorado continental signature, without being told to look there. Implicitly cross-validates `split_wl_slab()`.
+  - Spatial discrimination: median P_unstable_max essentially identical (release 0.349 vs skied 0.340, Δ +0.009); marginal upper-tail separation (p95 Δ +0.083); 2.5× hit-rate lift at P≥0.77 but on tiny absolute counts (6 vs 5 clusters).
+  - Mann-Whitney p=3.8e-9 reflects sample size, not operational signal.
+  - Conclusion: Mayer P_unstable correctly identifies *what* the weak layer is but cannot reliably tell us *where* on the slope it will fail. Complements the gradient-arrest physics model (which captures spatial discrimination); does not replace it. ISSW story is the dual-model design empirically justified.
+
+- [ ] **`compare_wl_methods.py` column rename** — the column currently labeled "P_unstable" in this script is `stab_deformation_rate` (S′), which saturates at 6.0. Now that actual P_unstable exists in the Zarr (`p_unstable_max`), rename the misleading column and optionally add the real P_unstable as a second comparison panel.
+
+- [ ] **Mayer Pk crust algorithm refinement** — current implementation in `extract_punstable_features.py` uses single-layer MFcr detection rather than Mayer's contiguous-block accumulation. Effect on Colorado snow likely minimal (strong crusts rare); revisit only if a reviewer asks.
+
+- [ ] **Per-cluster slope angle in Pk** — `extract_punstable_features.py` uses a global default (38°) used only for MFcr thickness projection. Pull `SlopeAngle=` from each `.pro` header into a sidecar or add as a Zarr coord. Bounded effect.
+
+- [ ] **Formal smoke test of P_unstable predictions against SLF's `input_example`** — we use sklearn 0.22.1 in an isolated env but on a newer OS / joblib version. Run the published example profile through our pipeline and compare predictions against SLF's reference outputs to close the model-validity loop.
+
+- [ ] **P_unstable follow-ups (low priority):**
+  - Time-evolution of P_unstable_max at trigger cluster vs skied clusters through the season — could reveal temporal discrimination the snapshot test misses.
+  - Timestep sensitivity: re-run validation at 20:00 UTC and 22:00 UTC. If signal is stronger at a different snapshot, reconsider temporal-saturation interpretation.
+  - The "0.952 out-of-crown" cluster case study — high P_unstable but Ron's SNOWPACK review suggests insufficient slab for crack propagation. Document as a case study of why high P_unstable alone doesn't imply triggering.
 
 - [ ] **BFS propagation at 1 m grid resolution** — test the BFS crack propagation model on the native 1 m DEM grid instead of the cluster neighbor graph, restricted to the area around the observed Jan 18 release area. Currently the BFS operates on ~6,636 clusters (~3 m median diameter); running at 1 m resolution within a cropped domain (~200×200 m around the release) would evaluate arrest criteria at the pixel scale (~64K cells but only ~4K in the cropped area). This would reveal whether cluster-scale smoothing of slab properties masks sharp gradients that control arrest at finer scales, and whether the BFS boundary converges to the same location as the cluster-based result. If boundaries differ meaningfully, the cluster resolution may need tightening (smaller `max_cells_per_cluster`) or the gradient thresholds may need recalibration for the finer grid. This is a diagnostic test — 1 m resolution across the full start zone is not operationally viable (would require ~65K SNOWPACK simulations).
 
@@ -111,7 +126,7 @@
 
 ## Visualization / Presentation
 
-- [ ] **High-resolution avalanche photo with Google Earth overlay** — acquire a higher-quality version of the Jan 18 avalanche photo (current image is a phone photo from Loveland Ski Area). Georeference the release area, track, and deposit boundaries and export as a KMZ overlay for Google Earth. This would allow interactive comparison of the observed avalanche extent against the BFS/probabilistic model polygons in 3D terrain context, and produce presentation-quality figures showing the model chain output draped on satellite imagery.
+- [x] **High-resolution avalanche photo with Google Earth overlay** — acquire a higher-quality version of the Jan 18 avalanche photo (current image is a phone photo from Loveland Ski Area). Georeference the release area, track, and deposit boundaries and export as a KMZ overlay for Google Earth. This would allow interactive comparison of the observed avalanche extent against the BFS/probabilistic model polygons in 3D terrain context, and produce presentation-quality figures showing the model chain output draped on satellite imagery.
 
 ---
 
