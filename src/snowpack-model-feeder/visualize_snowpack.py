@@ -43,7 +43,7 @@ from snowpack_analysis import (
 # Constants
 # =====================================================================
 
-DEFAULT_END_DATE  = "2026-02-01"
+DEFAULT_END_DATE  = "2026-01-18"
 DEFAULT_MIN_DEPTH = 30.0   # cm — exclude surface wind slab
 DEFAULT_MAX_DEPTH = 300.0  # cm
 
@@ -64,7 +64,7 @@ PANEL_SETS = {
         ("dhs_dt",  "dHS/dt (cm/d)", "RdBu_r", -20,  20,  0.0,  False),
     ],
     "stability": [
-        ("sk38_min", "Min Sk38",  "RdYlGn", 0, 3.0, SK38_CRIT, True),
+        ("sk38_min", "Min Sk38",  "RdYlGn", 0, 1.5, SK38_CRIT, True),
         ("ssi_min",  "Min SSI",   "RdYlGn", 0, 4.0, SSI_CRIT,  True),
         ("sn38_min", "Min Sn38",  "RdYlGn", 0, 3.0, SN38_CRIT, True),
     ],
@@ -211,6 +211,93 @@ def plot_frame(grids, dem, hillshade, bounds, timestamp,
 
 
 # =====================================================================
+# Combined GeoTIFF — same 4 fields as make_video.py's combined PNG,
+# written straight from the numeric grids (never has the release-area
+# overlay burned in, since that's a vector drawn only inside plot_frame)
+# =====================================================================
+
+# (var_key, band description) — order matches the band order in the file,
+# and mirrors exactly what make_video.py's create_plot_grid() crops from
+# the meloche/stability panel PNGs (m_grid[1][0], m_grid[0][1], m_grid[0][2],
+# stb_grid[0][0]) so the .tif and the eventual combined .png describe the
+# same four fields.
+COMBINED_TIF_VARS = [
+    ("tau_g",    "tau_g driving stress (Pa)"),
+    ("Lambda",   "Lambda elastic length (m)"),
+    ("sigma_t",  "sigma_t tensile strength (kPa)"),
+    ("sk38_min", "Min Sk38"),
+]
+
+
+def write_combined_tif(grids, transform, crs, output_path, dem=None,
+                       start_zone_mask=None):
+    """Write the 4 combined-view fields as a multi-band GeoTIFF, one band
+    per COMBINED_TIF_VARS entry, straight from the raw grids (no overlay,
+    no colormap, no resampling) so pixel values are the actual model output.
+
+    If dem is given (bare-ground elevation, same grid/shape as grids), it is
+    written as band 5 ('dem', meters) so each daily file is self-contained
+    for 3D/profile visualization -- no need to separately track dem_1m.tif.
+    The DEM is static across the season, so this trades a little redundant
+    storage per day for not having to carry a second file path downstream.
+
+    If start_zone_mask is given (boolean, same shape), it is written as
+    band 6 ('start_zone_mask', 1/0). This matters beyond just spatial
+    context: plot_frame's own color-scale normalization restricts its
+    percentile calculation to pixels INSIDE the start zone specifically
+    (see the "outside pixels have thin/patchy snow with extreme values"
+    comment at its call site) -- so anything downstream that wants to
+    match plot_frame's color scale, not just the terrain shape, needs
+    this mask, not just the broader (and noisier) domain-valid region."""
+    import rasterio
+
+    missing = [v for v, _ in COMBINED_TIF_VARS if v not in grids]
+    if missing:
+        print(f"    Warning: combined tif missing fields {missing}, skipping")
+        return
+
+    bands = list(COMBINED_TIF_VARS)
+    expected_shape = next(iter(grids.values())).shape
+    if dem is not None:
+        if dem.shape != expected_shape:
+            print(f"    Warning: dem shape {dem.shape} != grid shape "
+                  f"{expected_shape} (transform mismatch?) -- writing "
+                  f"combined tif WITHOUT the dem band")
+        else:
+            bands = bands + [("dem", "Bare-ground elevation (m)")]
+    if start_zone_mask is not None:
+        if start_zone_mask.shape != expected_shape:
+            print(f"    Warning: start_zone_mask shape {start_zone_mask.shape} "
+                  f"!= grid shape {expected_shape} -- writing combined tif "
+                  f"WITHOUT the start_zone_mask band")
+        else:
+            bands = bands + [("start_zone_mask", "Start zone mask (1/0)")]
+
+    height, width = next(iter(grids.values())).shape
+    profile = {
+        'driver': 'GTiff',
+        'dtype': 'float32',
+        'count': len(bands),
+        'height': height,
+        'width': width,
+        'transform': transform,
+        'crs': crs,
+        'nodata': np.nan,
+        'compress': 'lzw',
+    }
+    with rasterio.open(str(output_path), 'w', **profile) as dst:
+        for i, (var, desc) in enumerate(bands, start=1):
+            if var == "dem":
+                arr = dem
+            elif var == "start_zone_mask":
+                arr = start_zone_mask.astype(np.float32)
+            else:
+                arr = grids[var]
+            dst.write(arr.astype(np.float32), i)
+            dst.set_band_description(i, desc)
+
+
+# =====================================================================
 # HTML flipbook — three tabs
 # =====================================================================
 
@@ -327,14 +414,17 @@ document.addEventListener('keydown', e=>{{
 
 
 def main():
+    
+    ROOT_DIR = Path(__file__).parent.parent.parent
+    
     parser = argparse.ArgumentParser(
         description="Generate daily SNOWPACK frames — three thematic panel sets")
     parser.add_argument('--project-dir', default='.')
     parser.add_argument('--pro-dir',
-                        default='/home/ron/snowpack/little_prof/output')
+                        default=ROOT_DIR / 'snowpack' / 'little_prof' / 'output')
     parser.add_argument('--end-date', default=DEFAULT_END_DATE)
     parser.add_argument('--zarr-path', type=Path,
-                        default=Path('/home/ron/snowpack/little_prof/output/slope_snowpack.zarr'),
+                        default=ROOT_DIR / 'snowpack' / 'little_prof' / 'output' / 'slope_snowpack.zarr',
                         help='Path to Zarr cache (created on first run)')
     parser.add_argument('--min-depth', type=float, default=DEFAULT_MIN_DEPTH)
     parser.add_argument('--force', action='store_true',
@@ -353,12 +443,15 @@ def main():
     base_dir.mkdir(parents=True, exist_ok=True)
     for panel_name in PANEL_SETS:
         (base_dir / panel_name).mkdir(exist_ok=True)
+    combined_dir = base_dir / "combined"
+    combined_dir.mkdir(exist_ok=True)
 
     import rasterio
     with rasterio.open(str(cfg.resampled_dir / "dem_1m.tif")) as src:
         dem = src.read(1).astype(np.float32)
         dem[dem == src.nodata] = np.nan
         transform = src.transform
+        crs = src.crs
 
     cluster_map = np.load(str(cfg.analysis_dir / "cluster_map.npy"))
 
@@ -411,11 +504,11 @@ def main():
         date_str  = ts.strftime('%Y%m%d')
         frame_names.append(f"{date_str}.png")
 
-        # Check if all panel set frames already exist
+        # Check if all panel set frames AND the combined tif already exist
         all_exist = all(
             (base_dir / pname / f"{date_str}.png").exists()
             for pname in PANEL_SETS
-        )
+        ) and (combined_dir / f"{date_str}.tif").exists()
         if all_exist and not args.force:
             print(f"  [{i+1:3d}/{len(daily_noons)}] {date_str}: cached")
             # Still need to advance prev_hs_state
@@ -437,6 +530,10 @@ def main():
                        panel_name, panel_defs, out_path, args.min_depth,
                        boundaries=boundaries,
                        start_zone_mask=start_zone_mask_raster)
+
+        write_combined_tif(grids, transform, crs,
+                           combined_dir / f"{date_str}.tif", dem=dem,
+                           start_zone_mask=start_zone_mask_raster)
 
         print(f"  [{i+1:3d}/{len(daily_noons)}] {date_str}: written")
 

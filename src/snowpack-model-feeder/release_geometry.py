@@ -41,6 +41,53 @@ FRICTION_DEG     = 27.0   # snow friction angle (degrees), Meloche Table 1
 GAUME_ASPECT_CAP = 2.5    # max width/A_ca ratio (prevents runaway cross-slope)
 MIN_POLYGON_AREA = 200.0  # m² — discard degenerate polygons smaller than this
 
+# Meloche (2025) directional crack-arrest criterion. When True, _qualifies
+# replaces the heuristic Lambda/thickness gradient gates with the field-
+# validated A_ca scaling (Eq. 20): arrest a C->N step where the directed WL
+# shear-strength gradient makes the arrest length shorter than the step.
+# Left OFF by default so the existing gates run unchanged; flip to A/B the 75-run.
+USE_MELOCHE_ARREST = True
+MELOCHE_DELTA      = 1.0   # softening coefficient δ (Meloche default; their Table 1)
+
+
+# -----------------------------------------------------------------------
+# Polygon cleanup
+# -----------------------------------------------------------------------
+
+def fill_polygon_holes(geom, max_hole_frac: float | None = None):
+    """Remove interior rings (holes) from a (Multi)Polygon.
+
+    Holes arise when an interior cluster arrests inside the released set, or
+    from raster pixelation; com1DFA expects a simply-connected release area,
+    and the observed (hand-digitised) polygon used for IoU has no holes, so
+    filling also makes that comparison fair.
+
+    max_hole_frac : None  -> fill ALL holes (default; what com1DFA wants).
+                    float -> keep interior rings whose area exceeds
+                             max_hole_frac * exterior area. A large hole may be
+                             a genuine non-released island (rock outcrop, stable
+                             interior) that shouldn't be claimed as release.
+    """
+    from shapely.geometry import Polygon, MultiPolygon
+
+    def _fill(poly):
+        if not poly.interiors:
+            return poly
+        if max_hole_frac is None:
+            return Polygon(poly.exterior)
+        ext_area = Polygon(poly.exterior).area
+        keep = [r for r in poly.interiors
+                if Polygon(r).area > max_hole_frac * ext_area]
+        return Polygon(poly.exterior, keep)
+
+    if geom is None or geom.is_empty:
+        return geom
+    if geom.geom_type == 'Polygon':
+        return _fill(geom)
+    if geom.geom_type == 'MultiPolygon':
+        return MultiPolygon([_fill(p) for p in geom.geoms])
+    return geom
+
 
 # -----------------------------------------------------------------------
 # Terrain helpers
@@ -195,11 +242,14 @@ def estimate_cross_slope_width(
         return A_ca
 
     # Compute θ_cross from τ_p differences
-    tau_trigger = float(meloche_df.loc[trigger_cluster_id, 'tau_p']
-                        if 'tau_p' in meloche_df.columns
-                        else meloche_df.loc[trigger_cluster_id, 'wl_shear_strength']
-                        if 'wl_shear_strength' in meloche_df.columns
-                        else np.nan)
+    # Safely coerce to numeric scalar to avoid issues with non-float dtypes
+    if 'tau_p' in meloche_df.columns:
+        raw = meloche_df.loc[trigger_cluster_id, 'tau_p']
+    elif 'wl_shear_strength' in meloche_df.columns:
+        raw = meloche_df.loc[trigger_cluster_id, 'wl_shear_strength']
+    else:
+        raw = np.nan
+    tau_trigger = float(pd.to_numeric(raw, errors='coerce'))
     if np.isnan(tau_trigger):
         return A_ca
 
@@ -209,7 +259,7 @@ def estimate_cross_slope_width(
             continue
         col_name = ('tau_p' if 'tau_p' in meloche_df.columns
                     else 'wl_shear_strength')
-        tau_lat = float(meloche_df.loc[cid, col_name])
+        tau_lat = float(pd.to_numeric(meloche_df.loc[cid, col_name], errors='coerce'))
         if not np.isnan(tau_lat) and dist_px > 0:
             # Convert pixel distance to metres (assumes 1m pixels)
             theta_cross_vals.append(abs(tau_trigger - tau_lat) / dist_px)
@@ -481,11 +531,18 @@ def propagate_release(
     # Pi1 retained for reporting only
     threshold = pi1_trigger  # informational
 
-    # Minimum tau_g for crack propagation — no tuning, same as trigger filter
-    MIN_PROPAGATION_TAU_G = 50.0   # Pa
+    # Absolute gravitational-driving-stress floor for crack propagation (Pa).
+    # tau_g is the driving LOAD on the weak layer; below this value the WL
+    # cannot sustain dynamic fracture, regardless of slope or trigger. Unlike a
+    # relative floor, an absolute one can represent a stable slope: if no
+    # connected terrain exceeds it, the crack does not propagate.
+    # Jan 18 reference: ~540 Pa inside release, ~230 Pa adjacent (non-released).
+    # A floor in 230-540 reproduces that boundary on tau_g alone; ~200 is a
+    # lower physical bound. Sweep on the re-run.
+    TAU_G_ABS_FLOOR = 200.0   # Pa
 
     print(f"    Pi1_trigger={pi1_trigger:.3f}  "
-          f"MIN_tau_g={MIN_PROPAGATION_TAU_G:.0f}Pa  "
+          f"tau_g_floor={TAU_G_ABS_FLOOR:.0f}Pa  "
           f"size_factor={size_factor:.2f}")
 
     # --- Build per-cluster lookup: Pi1, mean slope ---
@@ -582,16 +639,17 @@ def propagate_release(
     # --- Per-cluster property lookup helpers ---
     def _get_props(cid):
         """Return dict of crack-relevant properties for a cluster."""
-        props = {}
+        props = {'cid': cid}
         if not meloche_df.empty and cid in meloche_df.index:
-            for col in ['Lambda', 'tau_g']:
+            for col in ['Lambda', 'tau_g', 'rc_wl', 'L_t']:
                 if col in meloche_df.columns:
                     v = meloche_df.loc[cid, col]
                     if isinstance(v, pd.DataFrame): v = v.iloc[0][col]
                     elif isinstance(v, pd.Series):  v = v.iloc[0]
                     props[col] = float(v)
         if snap_features is not None and cid in snap_features.index:
-            for col in ['slab_thickness', 'slab_density']:
+            for col in ['slab_thickness', 'slab_density',
+                        'wl_shear_strength', 'sigma_t']:
                 if col in snap_features.columns:
                     v = snap_features.loc[cid, col]
                     if isinstance(v, pd.Series): v = v.iloc[0]
@@ -641,16 +699,15 @@ def propagate_release(
         if is_downslope and _mean_slope(cid) < stauchwall_deg:
             return False, 'stauchwall_slope'
 
-        # Minimum tau_g — slab must be thick/steep enough to sustain crack
+        # Absolute tau_g arrest — driving stress below the physical floor
+        # cannot sustain crack propagation, regardless of slope or trigger.
+        # Applies in all directions (tau_g is a local load, not relative to
+        # where nucleation happened). This replaces the earlier trigger/region-
+        # relative floor, which could never represent a genuinely stable slope.
         nbr_props = _get_props(cid)
         tau_g_nbr = nbr_props.get('tau_g', np.nan)
-        if not np.isnan(tau_g_nbr) and tau_g_nbr < MIN_PROPAGATION_TAU_G:
-            return False, 'low_tau_g'
-
-        # Relative tau_g arrest — downslope and lateral only
-        if not is_upslope and not np.isnan(tau_g_nbr) \
-                and tau_g_nbr < tau_g_relative_floor:
-            return False, 'tau_g_relative_drop'
+        if not np.isnan(tau_g_nbr) and tau_g_nbr < TAU_G_ABS_FLOOR:
+            return False, 'tau_g_below_floor'
 
         # Minimum slab thickness
         h_nbr = nbr_props.get('slab_thickness', np.nan)
@@ -662,46 +719,93 @@ def propagate_release(
         if not np.isnan(lam_nbr_abs) and lam_nbr_abs < MIN_PROPAGATION_LAMBDA:
             return False, 'low_lambda'
 
-        # Lambda jump (local gradient)
+        # --- Crack-arrest gradient test -------------------------------------
+        if USE_MELOCHE_ARREST:
+            # Directional Meloche (2025) A_ca arrest. The crack arrests when it
+            # propagates INTO stronger weak layer (positive directed θ) and the
+            # resulting arrest length is shorter than the C->N step. Propagation
+            # into weaker/equal WL (θ_dir <= 0) never arrests here — the same
+            # asymmetry as the heuristic gates, but with the physically correct
+            # driver (WL shear-strength gradient) instead of the Λ/h proxies.
+            cur_cid = current_props.get('cid')
+            xy_c    = centroids.get(cur_cid)
+            xy_n    = centroids.get(cid)
+            tau_p_c = current_props.get('wl_shear_strength', np.nan)  # kPa
+            tau_p_n = nbr_props.get('wl_shear_strength', np.nan)      # kPa
+            if (xy_c is not None and xy_n is not None
+                    and not np.isnan(tau_p_c) and not np.isnan(tau_p_n)):
+                dist_cn = float(np.hypot(xy_n[0] - xy_c[0], xy_n[1] - xy_c[1]))
+                if dist_cn > 1e-6:
+                    # directed gradient toward stronger WL, Pa/m (tau_p is kPa)
+                    theta_dir = max(0.0, (tau_p_n - tau_p_c) * 1000.0 / dist_cn)
+                    if theta_dir > 0.0:
+                        Lam   = nbr_props.get('Lambda',  np.nan)
+                        tg    = tau_g_nbr
+                        sig_t = nbr_props.get('sigma_t', np.nan)
+                        L_t   = nbr_props.get('L_t',     np.nan)
+                        if (not any(np.isnan(v) for v in (Lam, tg, sig_t, L_t))
+                                and tg > 0.0):
+                            Pi     = tg / (theta_dir * Lam
+                                           * np.sqrt(1.0 + MELOCHE_DELTA))
+                            A_ca_d = L_t * Pi * np.sqrt(sig_t / tg)  # Eq. 20 (m)
+                            if A_ca_d < dist_cn:
+                                return False, 'meloche_arrest'
+            return True, 'propagated'
+
+        # Lambda jump (local gradient) — directional.
+        # A DROP in Lambda (softening / more compliant slab over the WL) is the
+        # physical arrest direction; a RISE (stiffening) should rarely arrest.
+        # Thresholds are therefore asymmetric: tight on drops, loose on rises.
         lam_current = current_props.get('Lambda', np.nan)
         lam_nbr     = nbr_props.get('Lambda', np.nan)
         if (not np.isnan(lam_current) and not np.isnan(lam_nbr)
                 and lam_current > 0):
-            rel_change = abs(lam_nbr - lam_current) / lam_current
-            if rel_change > LAMBDA_JUMP_FACTOR * size_factor:
-                return False, 'lambda_discontinuity'
+            signed_change = (lam_nbr - lam_current) / lam_current
+            if signed_change < 0:   # softening — arrest-prone
+                if -signed_change > LAMBDA_DROP_FACTOR * size_factor:
+                    return False, 'lambda_discontinuity_drop'
+            else:                   # stiffening — propagation-favorable
+                if signed_change > LAMBDA_RISE_FACTOR * size_factor:
+                    return False, 'lambda_discontinuity_rise'
 
-        # Slab thickness jump (local gradient)
+        # Slab thickness jump (local gradient) — directional.
+        # A DROP in thickness (toward a thinner slab that cannot sustain the
+        # fracture) arrests readily; a RISE (thicker slab) sustains propagation.
         h_current = current_props.get('slab_thickness', np.nan)
         if (not np.isnan(h_current) and not np.isnan(h_nbr)
                 and h_current > 0):
-            rel_change = abs(h_nbr - h_current) / h_current
-            if rel_change > THICKNESS_JUMP_FACTOR * size_factor:
-                return False, 'thickness_discontinuity'
+            signed_change = (h_nbr - h_current) / h_current
+            if signed_change < 0:   # thinning — arrest-prone
+                if -signed_change > THICKNESS_DROP_FACTOR * size_factor:
+                    return False, 'thickness_discontinuity_drop'
+            else:                   # thickening — propagation-favorable
+                if signed_change > THICKNESS_RISE_FACTOR * size_factor:
+                    return False, 'thickness_discontinuity_rise'
 
         return True, 'propagated'
 
-    # Gradient arrest thresholds — relative change in either direction
-    # LAMBDA_JUMP_FACTOR:    arrest if |ΔΛ/Λ| > 0.5 (50% change in either direction)
-    # THICKNESS_JUMP_FACTOR: arrest if |Δh/h|  > 0.25 (25% change in either direction)
-    # TAU_G_DROP_FACTOR:     arrest if neighbor tau_g < trigger_tau_g × factor
-    # size_factor multiplies threshold → larger size_factor = more tolerant = larger release
-    LAMBDA_JUMP_FACTOR    = 0.15
-    THICKNESS_JUMP_FACTOR = 0.15
-    TAU_G_DROP_FACTOR     = 0.60   # arrest when tau_g drops below 50% of trigger's
+    # Gradient arrest thresholds — DIRECTIONAL relative change.
+    # Softening/thinning (a DROP in Lambda or slab thickness) is the physical
+    # arrest mechanism and uses a tight threshold; stiffening/thickening (a RISE)
+    # favors continued propagation and uses a looser threshold, so the crack is
+    # not stopped prematurely by running into stronger/thicker snow.
+    #   arrest if  (Λ_nbr - Λ_cur)/Λ_cur  < -LAMBDA_DROP_FACTOR    (softening)
+    #   arrest if  (Λ_nbr - Λ_cur)/Λ_cur  > +LAMBDA_RISE_FACTOR    (stiffening)
+    #   (same pattern for slab thickness h)
+    # size_factor multiplies thresholds → larger size_factor = more tolerant = larger release.
+    LAMBDA_DROP_FACTOR     = 0.20   # tight: softening arrests readily
+    LAMBDA_RISE_FACTOR     = 0.30   # loose: stiffening rarely arrests
+    THICKNESS_DROP_FACTOR  = 0.20   # tight: thinning arrests readily
+    THICKNESS_RISE_FACTOR  = 0.30   # loose: thickening rarely arrests
+    # TAU_G_ABS_FLOOR (absolute driving-stress floor, Pa) is defined earlier,
+    # before the diagnostic print, and applied directly in _qualifies.
     MIN_PROPAGATION_SLAB  = 0.50   # m — slab too thin to sustain crack propagation
-    MIN_PROPAGATION_LAMBDA = 0.5   # m — slab too weak/compliant to transmit fracture
+    MIN_PROPAGATION_LAMBDA = 0.1   # m — slab too weak/compliant to transmit fracture
                                    # Λ = √(E×h³ / (12×G_wl×D_wl)): integrates
                                    # slab thickness, stiffness, and WL properties
 
-    # Relative tau_g floor: arrest when driving stress drops significantly
-    # from the trigger's value. This captures the 2.3× tau_g contrast
-    # observed at the Jan 18 release boundary.
-    tau_g_trigger_val = trigger_props.get('tau_g', np.nan)
-    if not np.isnan(tau_g_trigger_val) and tau_g_trigger_val > 0:
-        tau_g_relative_floor = tau_g_trigger_val * TAU_G_DROP_FACTOR
-    else:
-        tau_g_relative_floor = MIN_PROPAGATION_TAU_G  # fallback to absolute
+    # (tau_g arrest is now an absolute floor, TAU_G_ABS_FLOOR, applied directly
+    # in _qualifies — no per-trigger or per-region reference value to compute.)
 
     # --- Flood-fill from trigger through qualifying clusters ---
     qual_ok, qual_reason = _qualifies(trigger_cluster_id, trigger_props)
@@ -786,6 +890,11 @@ def propagate_release(
         polygon = max(polygon.geoms, key=lambda p: p.area)
     if polygon.is_empty or polygon.area < MIN_POLYGON_AREA:
         return None, failed
+
+    # Fill interior holes (arrested interior clusters / pixelation) so com1DFA
+    # gets a simply-connected release area. Pass max_hole_frac to preserve large
+    # genuine non-released islands.
+    polygon = fill_polygon_holes(polygon)
 
     return polygon, failed
 
@@ -918,6 +1027,8 @@ def plot_release_comparison(
         start_zone_mask=None,
         trigger_labels=None,
         trigger_centroids=None,
+        most_likely_polygon=None,
+        most_likely_label=None,
         out_path=None,
         title: str = "Release polygon comparison") -> None:
     """
@@ -989,6 +1100,15 @@ def plot_release_comparison(
         txt.set_path_effects([pe.Stroke(linewidth=2.5, foreground='white'),
                                pe.Normal()])
 
+    # Most-likely scenario polygon — bold black dashed outline on top, so it
+    # reads against the coloured per-trigger polygons. exterior.xy ignores holes.
+    ml_area = 0.0
+    if most_likely_polygon is not None and not most_likely_polygon.is_empty:
+        ml_area = most_likely_polygon.area
+        mxs, mys = most_likely_polygon.exterior.xy
+        ax.plot(mxs, mys, color='white', linewidth=4.2, zorder=7)   # halo
+        ax.plot(mxs, mys, color='black', linewidth=2.4, linestyle=(0, (6, 3)),
+                zorder=8)
     # Stats box
     if mel_areas and obs_area:
         ratio = float(np.median(mel_areas)) / obs_area
@@ -1000,17 +1120,25 @@ def plot_release_comparison(
         stats = "Meloche P50: %.0f m2" % float(np.median(mel_areas))
     else:
         stats = "No polygons generated"
+    if ml_area:
+        stats += "\nMost likely:    %6.0f m2" % ml_area
+        if obs_area:
+            stats += "\n  ML/Obs ratio:   %.2f" % (ml_area / obs_area)
     ax.text(0.02, 0.02, stats, transform=ax.transAxes, fontsize=8.5,
             verticalalignment='bottom', fontfamily='monospace',
             bbox=dict(boxstyle='round', facecolor='white',
                       edgecolor='gray', alpha=0.85))
 
     # Legend
-    handles = [
-        Line2D([0],[0], color='red',       linewidth=2.5,
-               label="Observed Jan 18  (%.0f m2)" % obs_area),
-        Line2D([0],[0], color='limegreen', linewidth=2.0, label='Start zone'),
-    ]
+    handles = []
+    handles.append(Line2D([0],[0], color='red',       linewidth=2.5,
+           label="Observed Jan 18  (%.0f m2)" % obs_area))
+    handles.append(Line2D([0],[0], color='limegreen', linewidth=2.0, label='Start zone'))
+    if ml_area:
+        handles.append(Line2D([0],[0], color='black', linewidth=2.4,
+                              linestyle=(0, (6, 3)),
+                              label=(most_likely_label
+                                     or "Most likely  (%.0f m2)" % ml_area)))
     for i, (poly, size_f) in enumerate(meloche_polygons):
         if poly is None or poly.is_empty:
             continue
@@ -1032,4 +1160,3 @@ def plot_release_comparison(
         plt.close(fig)
     else:
         plt.show()
-        

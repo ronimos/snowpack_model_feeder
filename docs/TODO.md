@@ -11,7 +11,7 @@
 
 - [ ] **Spatially distributed scour depth raster** — currently `scour_depth_m` is extracted only at the trigger cluster and applied uniformly across the path. com1DFA supports an entrainable-depth raster where each cell holds its own scour cap. To build this: run the failure-plane-to-hard-layer scan (same logic as the trigger extraction in `step_scenarios`) for every cluster in the domain, paint the result onto the 1 m grid, and write as a GeoTIFF alongside `depth.tif`. This would capture spatial variability in how much old snow the avalanche can entrain — e.g., thinner entrainable layer on wind-scoured ridges, thicker in sheltered terrain. **Blocked by:** com1DFA entrainable-depth raster input bug (may be config issue). Revisit once the raster input path is working.
 
-- [x] **Run observed-release validation for Val (AvaFrame)**
+- [ ] **Run observed-release validation for Val (AvaFrame)**
   ```bash
   python src/snowpack-model-feeder/analysis_pipeline.py scenarios \
       --snapshot-date 2026-01-17 --n-triggers 1 \
@@ -26,9 +26,9 @@
   **Dependency:** requires the observed-release validation run and the US-6 road polygon to also evaluate P(exceedance) sensitivity to μ/ξ.  
   **Note for multi-path extension:** μ/ξ are path-specific. Calibration on Little Professor does not transfer directly to Seven Sisters or Muleshoe — each path needs its own calibration against observed events or must use literature defaults with wider uncertainty bounds.
 
-- [x] **US-6 road polygon** for P(exceedance) calculation at infrastructure.
+- [ ] **US-6 road polygon** for P(exceedance) calculation at infrastructure.
 
-- [x] **Confirm AvaFrame version** supports raster depth input format.
+- [ ] **Confirm AvaFrame version** supports raster depth input format.
 
 ---
 
@@ -36,15 +36,15 @@
 
 - [ ] **Couple `scenarios` step to run both physical and probabilistic models** — add `--probabilistic` flag to `analysis_pipeline.py scenarios` that calls `probabilistic_release.py` for each trigger cluster after physical scenarios are written. Produces `release_comparison_YYYY-MM-DD_probability_model.png` alongside `_physical_model.png`.
 
-- [x] **Probabilistic model → AvaFrame scenario set** — integrate probabilistic release polygons as additional scenarios in the com1DFA ensemble. Weights derived from P(arrest) distributions rather than Sk38-based weights. This propagates release zone uncertainty through to runout probability envelopes, enabling the full probabilistic decision-support chain:
+- [ ] **Probabilistic model → AvaFrame scenario set** — integrate probabilistic release polygons as additional scenarios in the com1DFA ensemble. Weights derived from P(arrest) distributions rather than Sk38-based weights. This propagates release zone uncertainty through to runout probability envelopes, enabling the full probabilistic decision-support chain:
   ```
   P(release boundary) × P(runout | release) = P(exceedance at road)
   ```
   Currently the probabilistic model produces comparison plots only.
 
-- [x] **`--restrict-to-release-area` validation run** — confirm trigger selection after all filter fixes (Sk38 < 0.75, elevation P75).
+- [ ] **`--restrict-to-release-area` validation run** — confirm trigger selection after all filter fixes (Sk38 < 0.5, elevation P75).
 
-- [x] **Tune size_factor ensemble** against Jan 18 to confirm correct Mel/Obs ratio spread across 0.70–1.30.
+- [ ] **Tune size_factor ensemble** against Jan 18 to confirm correct Mel/Obs ratio spread across 0.70–1.30.
 
 - [ ] **Cross-date Meloche analysis** — run scenarios for Jan 10, Jan 14, Jan 17 to confirm Π₁ separation growing toward event. Should show increasing propagation probability as buried WL weakens.
 
@@ -91,7 +91,7 @@
 
 - [ ] **Formal smoke test of P_unstable predictions against SLF's `input_example`** — we use sklearn 0.22.1 in an isolated env but on a newer OS / joblib version. Run the published example profile through our pipeline and compare predictions against SLF's reference outputs to close the model-validity loop.
 
-- [ ] **P_unstable follow-ups (low priority):**
+- [ ] **P_unstable follow-ups (low priority, only if ISSW reviewer asks):**
   - Time-evolution of P_unstable_max at trigger cluster vs skied clusters through the season — could reveal temporal discrimination the snapshot test misses.
   - Timestep sensitivity: re-run validation at 20:00 UTC and 22:00 UTC. If signal is stronger at a different snapshot, reconsider temporal-saturation interpretation.
   - The "0.952 out-of-crown" cluster case study — high P_unstable but Ron's SNOWPACK review suggests insufficient slab for crack propagation. Document as a case study of why high P_unstable alone doesn't imply triggering.
@@ -126,7 +126,7 @@
 
 ## Visualization / Presentation
 
-- [x] **High-resolution avalanche photo with Google Earth overlay** — acquire a higher-quality version of the Jan 18 avalanche photo (current image is a phone photo from Loveland Ski Area). Georeference the release area, track, and deposit boundaries and export as a KMZ overlay for Google Earth. This would allow interactive comparison of the observed avalanche extent against the BFS/probabilistic model polygons in 3D terrain context, and produce presentation-quality figures showing the model chain output draped on satellite imagery.
+- [ ] **High-resolution avalanche photo with Google Earth overlay** — acquire a higher-quality version of the Jan 18 avalanche photo (current image is a phone photo from Loveland Ski Area). Georeference the release area, track, and deposit boundaries and export as a KMZ overlay for Google Earth. This would allow interactive comparison of the observed avalanche extent against the BFS/probabilistic model polygons in 3D terrain context, and produce presentation-quality figures showing the model chain output draped on satellite imagery.
 
 ---
 

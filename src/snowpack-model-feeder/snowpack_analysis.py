@@ -32,6 +32,9 @@ import xarray as xr
 WL_TYPES   = set(range(400, 500)) | set(range(500, 600))  # FC (4xx), DH (5xx)
 SLAB_TYPES = set(range(200, 300)) | set(range(300, 400))  # DF (2xx), RG (3xx)
 
+# Zarr variable holding SNOWPACK code 0606 (critical cut length r_c, m).
+RC_VAR = 'critical_cut_length'
+
 EVENT_DATE = pd.Timestamp("2026-01-18")
 
 GROUP_COLORS = {
@@ -297,10 +300,23 @@ def profile_features(ds_t_loc, min_depth_cm: float) -> dict:
         result['wl_burial_depth'] = float(-wl_z.max() / 100.0)          if len(wl_z) else np.nan
         result['wl_thickness']    = float(wl_z.max() - wl_z.min())      if len(wl_z) else np.nan
         result['interface_z']     = float(interface_z)
+
+        # Critical cut length r_c (SNOWPACK code 0606) AT the basal WL, read over
+        # the same wl_m elements as wl_shear_strength — not min over the full
+        # profile, which could land on a different (e.g. near-surface) layer.
+        # Onset / propagation-propensity metric (Gaume 2017; Richter 2019);
+        # used on the initiation side, complementary to the Meloche A_ca arrest.
+        try:
+            rc_v    = ds_t_loc[RC_VAR].values.ravel()       # per-element, m
+            rc_vals = rc_v[wl_m & ~np.isnan(rc_v)]
+            result['rc_wl'] = float(np.nanmean(rc_vals)) if len(rc_vals) else np.nan
+            # (swap nanmean -> nanmin if you want the most propagation-prone element)
+        except Exception:
+            result['rc_wl'] = np.nan
     else:
         for k in ('wl_shear_strength', 'wl_grain_size', 'wl_density',
                   'wl_hand_hardness', 'wl_burial_depth', 'wl_thickness',
-                  'interface_z'):
+                  'interface_z', 'rc_wl'):
             result[k] = np.nan
 
     # --- Meloche et al. (2025) parameters (per-cluster, no neighbors needed) ---
@@ -588,6 +604,7 @@ def compute_meloche_features(snap_data: dict, cluster_map: np.ndarray,
             'L_t':           L_t,
             'A_ca_elastic':  A_ca_elastic,
             'A_ca_brittle':  A_ca_brittle,
+            'rc_wl':         row.get('rc_wl', np.nan),
         })
 
     if not rows_out:
@@ -604,7 +621,7 @@ def reduce_scalars_at_time(ds: xr.Dataset,
                    prev_hs: dict,
                    min_depth_cm: float,
                    max_depth_cm: float,
-                   wl_method: str = 'simple') -> dict:
+                   wl_method: str = 'simple') -> tuple[dict, dict]:
     """
     Reduce all variables to per-cluster scalars at one timestep.
 
@@ -732,4 +749,3 @@ def reduce_scalars_at_time(ds: xr.Dataset,
         'Lambda':       Lambda_raw,
         'tau_g':        tau_g_raw,
     }, {'hs': hs, 'time': timestamp}
-    

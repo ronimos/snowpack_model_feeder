@@ -462,6 +462,8 @@ def step_scenarios(cfg, args):
     weight_map      = {}
     a_ca_list       = []
     median_polygons = []   # (polygon, size_factor) for comparison plot
+    most_likely     = {'weight': -1.0, 'scenario_id': None, 'polygon': None,
+                       'size_factor': None, 'trigger': None}  # highest-weight scenario
 
     for t_rank, (t_cid, _) in enumerate(triggers.iterrows()):
         # A_ca from Meloche features, fallback to 50m
@@ -692,6 +694,13 @@ def step_scenarios(cfg, args):
                 rows.append(row)
                 weight_map[scenario_id] = weight
 
+                # Track the highest-weight scenario for the comparison plot.
+                # (argmax is unaffected by the later normalisation.)
+                if weight > most_likely['weight']:
+                    most_likely = {'weight': weight, 'scenario_id': scenario_id,
+                                   'polygon': polygon, 'size_factor': size_f,
+                                   'trigger': t_cid}
+
     if not rows:
         print("WARNING: No scenarios generated — check trigger clusters and Meloche features")
         return out_dir
@@ -744,6 +753,13 @@ def step_scenarios(cfg, args):
             else:
                 t_centroids.append(None)
 
+        ml_poly  = most_likely['polygon']
+        ml_label = None
+        if most_likely['scenario_id'] is not None:
+            ml_label = (f"Most likely: {most_likely['scenario_id']} "
+                        f"(p={weight_map.get(most_likely['scenario_id'], 0.0):.3f}, "
+                        f"sf={most_likely['size_factor']:.2f})")
+
         plot_release_comparison(
             meloche_polygons = poly_pairs,
             observed_polygon = obs_poly,
@@ -752,11 +768,13 @@ def step_scenarios(cfg, args):
             start_zone_mask  = start_zone_mask,
             trigger_labels   = t_labels,
             trigger_centroids = t_centroids,
+            most_likely_polygon = ml_poly,
+            most_likely_label   = ml_label,
             out_path         = plot_path,
             title            = (f"Release polygon comparison — {args.snapshot_date} | "
                                f"Little Professor | Jan 18 event\n"
                                f"Blue = Meloche-derived  Red = Observed  "
-                               f"Green = Start zone"),
+                               f"Green = Start zone  Black dashed = Most likely"),
         )
     except Exception:
         print("WARNING: comparison plot failed — full traceback:")
@@ -873,3 +891,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    

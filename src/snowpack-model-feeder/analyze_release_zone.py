@@ -399,7 +399,7 @@ def run_snapshot_classifier(snap_data: dict, plots_dir: Path,
         import shap
         explainer   = shap.TreeExplainer(rf)
         shap_values = explainer.shap_values(X_sc)
-        shap_rel    = shap_values[1] if isinstance(shap_values, list)                       else shap_values
+        shap_rel    = shap_values[1] if isinstance(shap_values, list) else shap_values
         fig2, ax2 = plt.subplots(figsize=(7, 5))
         shap.summary_plot(shap_rel, X_sc, feature_names=feature_cols,
                           show=False, plot_type='bar')
