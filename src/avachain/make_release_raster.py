@@ -27,7 +27,7 @@ PROJECT_DIR = Path("/home/ron/snowpack_model_feeder")
 ZARR_PATH   = Path("/home/ron/snowpack/little_prof/output/slope_snowpack.zarr")
 OUT_DIR     = PROJECT_DIR / "outputs/scenarios/jan18_release"
 
-sys.path.insert(0, str(PROJECT_DIR / "src/snowpack-model-feeder"))
+sys.path.insert(0, str(PROJECT_DIR / "src/avachain"))
 from config import ProjectConfig
 from snowpack_io import load_dataset, kml_to_mask
 from release_geometry import depth_from_snowpack, rasterize_release_polygon

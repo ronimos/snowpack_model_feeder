@@ -25,7 +25,7 @@ probability envelopes.
 ## Repository Layout
 
 ```
-src/snowpack-model-feeder/
+src/avachain/
     forcing_pipeline.py       # Forcing pipeline: UAS surveys → SMET files
     analysis_pipeline.py      # Analysis pipeline: Zarr → release geometry → scenarios
     config.py                 # ProjectConfig dataclass — all paths and parameters
@@ -92,7 +92,7 @@ Transforms UAS snow depth surveys + weather station data into per-cluster SMET
 forcing files for SNOWPACK.
 
 ```bash
-python src/snowpack-model-feeder/forcing_pipeline.py <step>
+python src/avachain/forcing_pipeline.py <step>
 ```
 
 | Step | Description |
@@ -109,9 +109,9 @@ python src/snowpack-model-feeder/forcing_pipeline.py <step>
 Gap-fill modes:
 
 ```bash
-python src/snowpack-model-feeder/forcing_pipeline.py gap_fill              # observed transport (default, r=0.83)
-python src/snowpack-model-feeder/forcing_pipeline.py gap_fill --station-only  # station dHS only
-python src/snowpack-model-feeder/forcing_pipeline.py gap_fill --use-model     # RF + WindNinja (r=0.10, not recommended)
+python src/avachain/forcing_pipeline.py gap_fill              # observed transport (default, r=0.83)
+python src/avachain/forcing_pipeline.py gap_fill --station-only  # station dHS only
+python src/avachain/forcing_pipeline.py gap_fill --use-model     # RF + WindNinja (r=0.10, not recommended)
 ```
 
 ### Phase 2: SNOWPACK simulation
@@ -131,7 +131,7 @@ Extracts snowpack features from the Zarr, generates release polygons, and
 writes AvaFrame scenario directories.
 
 ```bash
-python src/snowpack-model-feeder/analysis_pipeline.py <step> [options]
+python src/avachain/analysis_pipeline.py <step> [options]
 ```
 
 | Step | Description |
@@ -143,19 +143,19 @@ Scenario generation:
 
 ```bash
 # Single trigger, 5 size factors, 3 depth percentiles = 15 scenarios
-python src/snowpack-model-feeder/analysis_pipeline.py scenarios \
+python src/avachain/analysis_pipeline.py scenarios \
     --snapshot-date 2026-01-17 --n-triggers 1 \
     --size-factors 0.70 0.85 1.00 1.15 1.30 \
     --depth-pcts 10 50 90
 
 # Multi-trigger ensemble = 75 scenarios
-python src/snowpack-model-feeder/analysis_pipeline.py scenarios \
+python src/avachain/analysis_pipeline.py scenarios \
     --snapshot-date 2026-01-17 --n-triggers 5 \
     --size-factors 0.70 0.85 1.00 1.15 1.30 \
     --depth-pcts 10 50 90
 
 # Validation against observed release area
-python src/snowpack-model-feeder/analysis_pipeline.py scenarios \
+python src/avachain/analysis_pipeline.py scenarios \
     --snapshot-date 2026-01-17 --n-triggers 1 \
     --use-observed-release
 ```
@@ -228,10 +228,10 @@ outputs/scenarios/YYYY-MM-DD/
 
 ```bash
 # Fast test (simple WL split)
-python src/snowpack-model-feeder/visualize_snowpack.py --end-date 2026-01-20
+python src/avachain/visualize_snowpack.py --end-date 2026-01-20
 
 # Full season with grain-type WL detection
-python src/snowpack-model-feeder/visualize_snowpack.py \
+python src/avachain/visualize_snowpack.py \
     --end-date 2026-03-31 --wl-method grain_type
 ```
 

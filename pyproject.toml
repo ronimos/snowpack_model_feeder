@@ -1,7 +1,7 @@
 [project]
-name = "snowpack-model-feeder"
+name = "avachain"
 version = "0.1.0"
-description = "Add your description here"
+description = "UAV snow surveys → distributed SNOWPACK → stability analysis → release scenarios → com1DFA runout probability"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

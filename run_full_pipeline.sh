@@ -37,8 +37,8 @@ set -euo pipefail
 # --- Configuration ---
 PROJECT_DIR=/home/ron/snowpack_model_feeder
 SNOWPACK_DIR=$PROJECT_DIR/snowpack/little_prof
-PIPELINE="python $PROJECT_DIR/src/snowpack-model-feeder/forcing_pipeline.py"
-ANALYSIS="python $PROJECT_DIR/src/snowpack-model-feeder/analysis_pipeline.py"
+PIPELINE="python $PROJECT_DIR/src/avachain/forcing_pipeline.py"
+ANALYSIS="python $PROJECT_DIR/src/avachain/analysis_pipeline.py"
 VENV=$PROJECT_DIR/.venv/bin/activate
 LOG_DIR=$PROJECT_DIR/outputs/logs
 

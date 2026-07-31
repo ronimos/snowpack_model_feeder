@@ -9,7 +9,7 @@ Produces a release comparison plot (_probability_model) alongside the
 physics model plot (_physical_model) from analysis_pipeline.py.
 
 Usage:
-  python src/snowpack-model-feeder/probabilistic_release.py \
+  python src/avachain/probabilistic_release.py \
       --snapshot-date 2026-01-18 \
       --trigger-cid 3178 \
       --model outputs/models/boundary_model_2026-01-18.pkl \

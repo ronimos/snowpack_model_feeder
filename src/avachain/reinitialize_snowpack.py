@@ -13,18 +13,18 @@ Two-pass SNOWPACK workflow:
 
 Called from forcing_pipeline.py as step_reinit(), or standalone:
 
-    python src/snowpack-model-feeder/reinitialize_snowpack.py \
+    python src/avachain/reinitialize_snowpack.py \
         --date-before 2026-01-14 --date-after 2026-01-20 \
         --event-date 2026-01-18 \
         --snapshot-date 2026-01-18
 
     # Dry run
-    python src/snowpack-model-feeder/reinitialize_snowpack.py \
+    python src/avachain/reinitialize_snowpack.py \
         --date-before 2026-01-14 --date-after 2026-01-20 \
         --event-date 2026-01-18 --dry-run
 
     # Use pre-drawn release GeoJSON instead of auto-detection
-    python src/snowpack-model-feeder/reinitialize_snowpack.py \
+    python src/avachain/reinitialize_snowpack.py \
         --release-geojson data/boundaries/avalanche_release_area.geojson \
         --event-date 2026-01-18
 """
@@ -39,7 +39,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent /
-                       "src" / "snowpack-model-feeder"))
+                       "src" / "avachain"))
 
 
 # -----------------------------------------------------------------------

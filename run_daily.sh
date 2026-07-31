@@ -46,7 +46,7 @@ set -euo pipefail
 # --- Configuration ---
 PROJECT_DIR=/home/ron/snowpack_model_feeder
 SNOWPACK_DIR=$PROJECT_DIR/snowpack/little_prof
-SRC=$PROJECT_DIR/src/snowpack-model-feeder
+SRC=$PROJECT_DIR/src/avachain
 PIPELINE="python $SRC/forcing_pipeline.py"
 ANALYSIS="python $SRC/analysis_pipeline.py"
 AWS_INGEST="python $SRC/aws_ingest.py"
