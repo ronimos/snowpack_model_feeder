@@ -37,7 +37,8 @@ set -euo pipefail
 
 # --- Configuration ---
 PROJECT_DIR=/home/ron/snowpack_model_feeder
-SNOWPACK_DIR=$PROJECT_DIR/snowpack/little_prof
+SLOPE_SCRIPTS=$PROJECT_DIR/slopes/little_prof
+SLOPE_DIR=${SLOPE_DIR:-$PROJECT_DIR/snowpack/little_prof}
 PIPELINE="python $PROJECT_DIR/src/avachain/forcing_pipeline.py"
 ANALYSIS="python $PROJECT_DIR/src/avachain/analysis_pipeline.py"
 VENV=$PROJECT_DIR/.venv/bin/activate
@@ -154,7 +155,7 @@ if [[ $REINIT -eq 1 ]]; then
     fi
 
     echo "    Pass 1: incremental → ${EVENT_DATE}T18:00"
-    bash "$SNOWPACK_DIR/run_snowpack.sh" "" "${EVENT_DATE}T18:00"
+    bash "$SLOPE_SCRIPTS/run_snowpack.sh" "" "${EVENT_DATE}T18:00"
 
     echo ""
     echo "    Analyzing snowpack at $REINIT_SNAPSHOT for slab thickness..."
@@ -177,15 +178,15 @@ if [[ $REINIT -eq 1 ]]; then
     echo "    Pass 2: $EVENT_DATE → end of season (scoured clusters only)"
     REINIT_STATS="$PROJECT_DIR/outputs/analysis/reinit_stats_${EVENT_DATE}.json"
     if [[ -f "$REINIT_STATS" ]]; then
-        bash "$SNOWPACK_DIR/run_snowpack.sh" "" "" "$REINIT_STATS"
+        bash "$SLOPE_SCRIPTS/run_snowpack.sh" "" "" "$REINIT_STATS"
     else
         echo "    WARNING: reinit stats not found, rerunning all clusters"
-        bash "$SNOWPACK_DIR/run_snowpack.sh"
+        bash "$SLOPE_SCRIPTS/run_snowpack.sh"
     fi
 else
     # --- Single-pass SNOWPACK (incremental from restart) ---
     echo "    Incremental from restart files"
-    bash "$SNOWPACK_DIR/run_snowpack.sh"
+    bash "$SLOPE_SCRIPTS/run_snowpack.sh"
 fi
 
 step3_elapsed=$((SECONDS - step3_start))

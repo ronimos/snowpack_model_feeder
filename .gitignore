@@ -30,27 +30,44 @@ scripts/
 *.zip
 *GH001*
 
-# Data files (if not needed for version control)
-data/
-snowpack/output/
-snowpack/little_prof/windninja/
+# Source input data — large files excluded, small boundary/config files tracked
+data/dem/
+data/surveys/
+data/weather/*.csv
+# data/boundaries/ and data/weather/refill.* ARE tracked (version-controlled inputs)
+
+# Pipeline outputs (all derived/regeneratable)
+outputs/
+results/
+
+# Snowpack runtime data (large, lives outside repo in /data/snowpack/)
+# The snowpack/ dir only remains in repo during transition; once data is
+# moved to /data/snowpack/, this whole dir can be removed from the tree.
 snowpack/little_prof/output/
 snowpack/little_prof/input/
-results/
-outputs/
-config.json
-*.tif*
-*.csv
+snowpack/little_prof/windninja/
+snowpack/little_prof/temp/
+
+# Slope-specific large assets (windninja libs, not source)
+slopes/*/windninja/
+
+# Raw SNOWPACK file types (never commit these regardless of location)
 *.smet
 *.sno
 *.pro
 *.zarr
+# Exception: the weather refill template is a small, version-controlled input
+!data/weather/refill.smet
+!data/weather/refill.sno
 
-# External models and checkpoints
+# Misc large binaries
+*.tif
+*.tiff
+*.csv
+config.json
 models/
-checkpoints/    
+checkpoints/
 windninja/
-src/snowpack-model-feeder/windninja/
-windninja
+src/avachain/windninja/
 Miniforge3-Linux-x86_64.sh
 ffmpeg*/

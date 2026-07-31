@@ -153,10 +153,10 @@ def compute_features(h, rho, gs, sph, strs, vdr, gtype, slope_deg):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--zarr',
-        default='/home/ron/snowpack_model_feeder/snowpack/little_prof/output/'
+        default='/data/snowpack/little_prof/output/'
                 'slope_snowpack.zarr')
     p.add_argument('--out',
-        default='/home/ron/snowpack_model_feeder/snowpack/little_prof/output/'
+        default='/data/snowpack/little_prof/output/'
                 'punstable_features.npz')
     p.add_argument('--chunk-loc', type=int, default=500,
                    help='Number of locations to load+compute per chunk')

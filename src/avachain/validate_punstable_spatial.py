@@ -99,7 +99,7 @@ def draw_polygon(ax, geom, color, label):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--zarr',
-        default='/home/ron/snowpack_model_feeder/snowpack/little_prof/output/'
+        default='/data/snowpack/little_prof/output/'
                 'slope_snowpack.zarr')
     p.add_argument('--cluster-raster', required=True)
     p.add_argument('--release-area', required=True,

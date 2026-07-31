@@ -21,8 +21,13 @@ class ProjectConfig:
     output_dir: Path = Path("outputs")
     windninja_library_dir: Path = Path("windninja/library")
 
-    # --- SNOWPACK paths ---
-    snowpack_dir: Path = Path("snowpack/little_prof")
+    # --- Per-slope runtime directory (outside the repo) ---
+    # Source-controlled slope config lives in slopes/<slope_name>/;
+    # runtime data (input/smet/, output/*.pro, output/*.zarr) lives here.
+    # Default points to the legacy in-repo location so existing runs
+    # keep working until the data is physically moved to /data/snowpack/.
+    slope_name: str = "little_prof"
+    slope_dir: Path = Path("snowpack/little_prof")
     release_geojson: Path = Path("data/boundaries/avalanche_release_area.geojson")
 
     # --- Scenario defaults ---
@@ -84,7 +89,7 @@ class ProjectConfig:
         self.start_zone_kml = self.project_dir / self.start_zone_kml
         self.output_dir = self.project_dir / self.output_dir
         self.windninja_library_dir = self.project_dir / self.windninja_library_dir
-        self.snowpack_dir = self.project_dir / self.snowpack_dir
+        self.slope_dir = self.project_dir / self.slope_dir
         self.release_geojson = self.project_dir / self.release_geojson
 
     @property
@@ -98,7 +103,11 @@ class ProjectConfig:
 
     @property
     def smet_dir(self) -> Path:
-        return self.output_dir / "smet"
+        # SMETs live under the slope runtime dir (SNOWPACK input), not outputs/.
+        # Falls back to outputs/smet/ if the slope input dir doesn't exist yet
+        # so existing runs keep working before the data is physically moved.
+        candidate = self.slope_dir / "input" / "smet"
+        return candidate if candidate.parent.exists() else self.output_dir / "smet"
 
     @property
     def grids_dir(self) -> Path:
@@ -110,11 +119,15 @@ class ProjectConfig:
 
     @property
     def pro_dir(self) -> Path:
-        return self.snowpack_dir / "output"
+        return self.slope_dir / "output"
 
     @property
     def zarr_path(self) -> Path:
         return self.pro_dir / "slope_snowpack.zarr"
+
+    @property
+    def slopes_config_dir(self) -> Path:
+        return self.project_dir / "slopes" / self.slope_name
 
     @property
     def scenarios_dir(self) -> Path:

@@ -45,7 +45,8 @@ set -euo pipefail
 
 # --- Configuration ---
 PROJECT_DIR=/home/ron/snowpack_model_feeder
-SNOWPACK_DIR=$PROJECT_DIR/snowpack/little_prof
+SLOPE_SCRIPTS=$PROJECT_DIR/slopes/little_prof
+SLOPE_DIR=${SLOPE_DIR:-$PROJECT_DIR/snowpack/little_prof}
 SRC=$PROJECT_DIR/src/avachain
 PIPELINE="python $SRC/forcing_pipeline.py"
 ANALYSIS="python $SRC/analysis_pipeline.py"
@@ -141,7 +142,7 @@ if [[ $FORECAST_ONLY -eq 0 ]]; then
     if [[ $DRY_RUN -eq 0 ]]; then
         echo "  [1c] SNOWPACK incremental (→ ${SNAPSHOT}T18:00)"
         t=$SECONDS
-        bash "$SNOWPACK_DIR/run_snowpack.sh" "" "${SNAPSHOT}T18:00"
+        bash "$SLOPE_SCRIPTS/run_snowpack.sh" "" "${SNAPSHOT}T18:00"
         echo "       $(( SECONDS - t ))s"
         echo ""
     else
@@ -214,7 +215,7 @@ if [[ $RUN_FORECAST -eq 1 ]]; then
     if [[ $DRY_RUN -eq 0 ]]; then
         echo "  [2b] SNOWPACK forecast run (→ ${T2}T18:00)"
         t=$SECONDS
-        bash "$SNOWPACK_DIR/run_snowpack.sh" "" "${T2}T18:00"
+        bash "$SLOPE_SCRIPTS/run_snowpack.sh" "" "${T2}T18:00"
         echo "       $(( SECONDS - t ))s"
         echo ""
     else

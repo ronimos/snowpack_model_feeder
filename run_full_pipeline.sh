@@ -36,7 +36,8 @@ set -euo pipefail
 
 # --- Configuration ---
 PROJECT_DIR=/home/ron/snowpack_model_feeder
-SNOWPACK_DIR=$PROJECT_DIR/snowpack/little_prof
+SLOPE_SCRIPTS=$PROJECT_DIR/slopes/little_prof
+SLOPE_DIR=${SLOPE_DIR:-$PROJECT_DIR/snowpack/little_prof}
 PIPELINE="python $PROJECT_DIR/src/avachain/forcing_pipeline.py"
 ANALYSIS="python $PROJECT_DIR/src/avachain/analysis_pipeline.py"
 VENV=$PROJECT_DIR/.venv/bin/activate
@@ -128,10 +129,10 @@ echo ">>> Phase 2: SNOWPACK simulation"
 
 if [[ $CLEAN -eq 1 ]]; then
     echo "    --clean: removing restart files, .pro, per-cluster .sno, and Zarr"
-    rm -f "$SNOWPACK_DIR"/output/*.sno
-    rm -f "$SNOWPACK_DIR"/output/*.pro
-    rm -rf "$SNOWPACK_DIR"/output/slope_snowpack.zarr
-    rm -f "$SNOWPACK_DIR"/input/snow/cluster_*.sno
+    rm -f "$SLOPE_DIR"/output/*.sno
+    rm -f "$SLOPE_DIR"/output/*.pro
+    rm -rf "$SLOPE_DIR"/output/slope_snowpack.zarr
+    rm -f "$SLOPE_DIR"/input/snow/cluster_*.sno
     echo "    Cleaned. SNOWPACK will start from template.sno."
 fi
 
@@ -150,7 +151,7 @@ if [[ $REINIT -eq 1 ]]; then
 
     echo ""
     echo "    Pass 1: Season start → ${EVENT_DATE}T18:00"
-    bash "$SNOWPACK_DIR/run_snowpack.sh" "" "${EVENT_DATE}T18:00"
+    bash "$SLOPE_SCRIPTS/run_snowpack.sh" "" "${EVENT_DATE}T18:00"
 
     echo ""
     echo "    Analyzing snowpack at $REINIT_SNAPSHOT for slab thickness..."
@@ -173,15 +174,15 @@ if [[ $REINIT -eq 1 ]]; then
     echo "    Pass 2: $EVENT_DATE → end of season (scoured clusters only)"
     REINIT_STATS="$PROJECT_DIR/outputs/analysis/reinit_stats_${EVENT_DATE}.json"
     if [[ -f "$REINIT_STATS" ]]; then
-        bash "$SNOWPACK_DIR/run_snowpack.sh" "" "" "$REINIT_STATS"
+        bash "$SLOPE_SCRIPTS/run_snowpack.sh" "" "" "$REINIT_STATS"
     else
         echo "    WARNING: reinit stats not found, rerunning all clusters"
-        bash "$SNOWPACK_DIR/run_snowpack.sh"
+        bash "$SLOPE_SCRIPTS/run_snowpack.sh"
     fi
 else
     # --- Single-pass SNOWPACK ---
     echo ""
-    bash "$SNOWPACK_DIR/run_snowpack.sh"
+    bash "$SLOPE_SCRIPTS/run_snowpack.sh"
 fi
 
 phase2_elapsed=$((SECONDS - phase2_start))
@@ -219,7 +220,7 @@ fi
 echo ""
 echo "  Outputs:"
 echo "    SMET files:    $PROJECT_DIR/outputs/smet/"
-echo "    SNOWPACK:      $SNOWPACK_DIR/output/"
+echo "    SNOWPACK:      $SLOPE_DIR/output/"
 echo "    Scenarios:     $PROJECT_DIR/outputs/scenarios/"
 echo "    Log:           $LOGFILE"
 echo "============================================================"

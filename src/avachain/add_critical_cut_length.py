@@ -114,9 +114,9 @@ def _init_worker(var_code):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--pro-dir',
-                   default='/home/ron/snowpack_model_feeder/snowpack/little_prof/output')
+                   default='/data/snowpack/little_prof/output')
     p.add_argument('--zarr',
-                   default='/home/ron/snowpack_model_feeder/snowpack/little_prof/output/'
+                   default='/data/snowpack/little_prof/output/'
                            'slope_snowpack.zarr')
     p.add_argument('--workers', type=int, default=8)
     p.add_argument('--var-code', default='0606',

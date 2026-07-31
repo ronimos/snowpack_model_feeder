@@ -1,0 +1,29 @@
+[
+  {
+    "period": "2025-12-04__2025-12-12",
+    "timestamp": "2025-12-06T19:00:00Z",
+    "size": "unknown",
+    "trigger": null,
+    "source": "CAIC API",
+    "n_observations": 1,
+    "notes": "Auto-fetched from CAIC API. 1 observation(s) in this period. Location accuracy approximate."
+  },
+  {
+    "period": "2026-01-06__2026-01-14",
+    "timestamp": "2026-01-10T19:00:00Z",
+    "size": "unknown",
+    "trigger": null,
+    "source": "CAIC API",
+    "n_observations": 1,
+    "notes": "Auto-fetched from CAIC API. 1 observation(s) in this period. Location accuracy approximate."
+  },
+  {
+    "period": "2026-01-14__2026-01-20",
+    "timestamp": "2026-01-18T17:00:00Z",
+    "size": "unknown",
+    "trigger": null,
+    "source": "CAIC API",
+    "n_observations": 1,
+    "notes": "Auto-fetched from CAIC API. 1 observation(s) in this period. Location accuracy approximate."
+  }
+]

@@ -29,13 +29,13 @@ import numpy as np
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--features',
-        default='/home/ron/snowpack_model_feeder/snowpack/little_prof/output/'
+        default='/data/snowpack/little_prof/output/'
                 'punstable_features.npz')
     p.add_argument('--model',
-        default='/home/ron/snowpack_model_feeder/snowpack/little_prof/'
+        default='/data/snowpack/little_prof/'
                 'external_models/RF_instability_model.sav')
     p.add_argument('--out',
-        default='/home/ron/snowpack_model_feeder/snowpack/little_prof/output/'
+        default='/data/snowpack/little_prof/output/'
                 'punstable_predictions.npz')
     p.add_argument('--batch-size', type=int, default=1_000_000,
                    help='Rows per predict_proba call (memory control)')

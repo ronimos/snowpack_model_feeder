@@ -39,10 +39,10 @@ SUMMARY_VARS = [
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--zarr',
-        default='/home/ron/snowpack_model_feeder/snowpack/little_prof/output/'
+        default='/data/snowpack/little_prof/output/'
                 'slope_snowpack.zarr')
     p.add_argument('--predictions',
-        default='/home/ron/snowpack_model_feeder/snowpack/little_prof/output/'
+        default='/data/snowpack/little_prof/output/'
                 'punstable_predictions.npz')
     p.add_argument('--write-3d', action='store_true',
                    help='Also write full (location, time, layer) P_unstable')

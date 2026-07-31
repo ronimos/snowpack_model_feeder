@@ -12,11 +12,16 @@
 SNOWPACK_BIN=/home/caic/caic/rtsys/snowpack/exe/snowpack
 export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/home/caic/caic/rtsys/snowpack/src/snowpack/lib
 
-PROJECT_DIR=/home/ron/snowpack_model_feeder/snowpack/little_prof
-SMET_DIR=/home/ron/snowpack_model_feeder/outputs/smet
-SNOW_IN_DIR=$PROJECT_DIR/input/snow
-OUTPUT_DIR=$PROJECT_DIR/output
-MASTER_CFG=$PROJECT_DIR/config/master_config.ini
+# REPO_DIR: root of the avachain git repo
+# SLOPE_DIR: runtime data directory for this slope (input/, output/)
+#   During the research phase this defaults to snowpack/little_prof/ inside
+#   the repo. For operational deployment, set SLOPE_DIR=/data/snowpack/little_prof
+REPO_DIR=/home/ron/snowpack_model_feeder
+SLOPE_DIR=${SLOPE_DIR:-$REPO_DIR/snowpack/little_prof}
+SMET_DIR=${SMET_DIR:-$REPO_DIR/outputs/smet}
+SNOW_IN_DIR=$SLOPE_DIR/input/snow
+OUTPUT_DIR=$SLOPE_DIR/output
+MASTER_CFG=$REPO_DIR/slopes/little_prof/config/master_config.ini
 TEMPLATE_SNO=$SNOW_IN_DIR/template.sno
 
 # --- Date range ---
@@ -164,5 +169,6 @@ fi
 # --- Build Zarr Store ---
 echo ""
 echo "=== Aggregating results to Zarr ==="
-/home/ron/snowpack_model_feeder/.venv/bin/python3 /home/ron/snowpack_model_feeder/snowpack/little_prof/build_zarr_chunked.py
+$REPO_DIR/.venv/bin/python3 $REPO_DIR/src/avachain/build_zarr_chunked.py \
+    --pro-dir "$OUTPUT_DIR" --zarr-out "$OUTPUT_DIR/slope_snowpack.zarr"
 echo "=== Zarr Build Complete ==="
