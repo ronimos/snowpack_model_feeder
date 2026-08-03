@@ -60,27 +60,45 @@ def _reproject_lonlat_to_utm(pts_lonlat, epsg: int = 32613):
     return [t.transform(x, y) for x, y in pts_lonlat]
 
 
-def geojson_to_mask(path, dem_shape, transform) -> np.ndarray:
+def geojson_to_mask(path, dem_shape, transform, dst_epsg: int = 6342) -> np.ndarray:
     from shapely.geometry import shape
     from shapely.ops import unary_union
+    from pyproj import Transformer as _T, CRS as _CRS
 
     with open(str(path)) as f:
         gj = json.load(f)
     polys = [shape(feat['geometry']) for feat in gj['features']]
     merged = unary_union(polys)
 
-    def reproj(poly):
-        from shapely.geometry import Polygon, MultiPolygon
-        def ring(r): return _reproject_lonlat_to_utm(list(r.coords))
-        if poly.geom_type == 'Polygon':
-            return Polygon(ring(poly.exterior),
-                           [ring(i) for i in poly.interiors])
-        return MultiPolygon([reproj(p) for p in poly.geoms])
+    # Detect source CRS from the file's crs node; fall back to WGS84.
+    src_epsg = 4326
+    crs_node = gj.get('crs', {}).get('properties', {}).get('name', '')
+    if 'EPSG:' in crs_node.upper():
+        try:
+            src_epsg = int(crs_node.upper().split('EPSG:')[1].split('"')[0])
+        except (ValueError, IndexError):
+            pass
 
-    merged_utm = reproj(merged)
+    if src_epsg != dst_epsg:
+        tr = _T.from_crs(f'EPSG:{src_epsg}', f'EPSG:{dst_epsg}', always_xy=True)
+        from shapely.geometry import Polygon, MultiPolygon
+
+        def _reproj_ring(r):
+            xs, ys = zip(*r.coords)
+            xs2, ys2 = tr.transform(xs, ys)
+            return list(zip(xs2, ys2))
+
+        def reproj(poly):
+            if poly.geom_type == 'Polygon':
+                return Polygon(_reproj_ring(poly.exterior),
+                               [_reproj_ring(i) for i in poly.interiors])
+            return MultiPolygon([reproj(p) for p in poly.geoms])
+
+        merged = reproj(merged)
+
     aff = transform if hasattr(transform, 'c') else rt.Affine(*transform[:6])
     mask = rasterio.features.geometry_mask(
-        [merged_utm.__geo_interface__], out_shape=dem_shape,
+        [merged.__geo_interface__], out_shape=dem_shape,
         transform=aff, invert=True)
     print(f"  Release zone mask:  {mask.sum()} cells")
     return mask

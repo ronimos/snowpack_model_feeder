@@ -46,7 +46,7 @@ MIN_POLYGON_AREA = 200.0  # m² — discard degenerate polygons smaller than thi
 # validated A_ca scaling (Eq. 20): arrest a C->N step where the directed WL
 # shear-strength gradient makes the arrest length shorter than the step.
 # Left OFF by default so the existing gates run unchanged; flip to A/B the 75-run.
-USE_MELOCHE_ARREST = True
+USE_MELOCHE_ARREST = False
 MELOCHE_DELTA      = 1.0   # softening coefficient δ (Meloche default; their Table 1)
 
 
@@ -157,7 +157,7 @@ def find_stauchwall(trigger_row: int,
             return row, col
         # Step one pixel in the downslope direction
         asp_rad = np.radians(aspect_grid[row, col])
-        dr = int(np.sign( np.cos(asp_rad)))   # row advances with -y (north)
+        dr = int(np.sign(-np.cos(asp_rad)))   # rows increase southward, so negate north component
         dc = int(np.sign( np.sin(asp_rad)))   # col advances with +x (east)
         new_row = row + dr
         new_col = col + dc
@@ -537,9 +537,9 @@ def propagate_release(
     # relative floor, an absolute one can represent a stable slope: if no
     # connected terrain exceeds it, the crack does not propagate.
     # Jan 18 reference: ~540 Pa inside release, ~230 Pa adjacent (non-released).
-    # A floor in 230-540 reproduces that boundary on tau_g alone; ~200 is a
+    # A floor in 230-540 reproduces that boundary on tau_g alone; ~350 is a
     # lower physical bound. Sweep on the re-run.
-    TAU_G_ABS_FLOOR = 200.0   # Pa
+    TAU_G_ABS_FLOOR = 350.0   # Pa
 
     print(f"    Pi1_trigger={pi1_trigger:.3f}  "
           f"tau_g_floor={TAU_G_ABS_FLOOR:.0f}Pa  "
@@ -695,8 +695,10 @@ def propagate_release(
         if not is_upslope and not is_downslope and dist > d_lat:
             return False, 'lateral_distance_cap'
 
-        # Downslope terrain threshold
-        if is_downslope and _mean_slope(cid) < stauchwall_deg:
+        # Terrain slope threshold — applies to all directions (downslope and lateral).
+        # Upslope clusters are exempt: the crack nucleates from above and the
+        # upslope boundary is already governed by the A_ca distance cap.
+        if not is_upslope and _mean_slope(cid) < stauchwall_deg:
             return False, 'stauchwall_slope'
 
         # Absolute tau_g arrest — driving stress below the physical floor
