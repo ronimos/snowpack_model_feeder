@@ -673,7 +673,7 @@ def main():
     group_ids_path.write_text(json.dumps(serializable_groups, indent=2))
     print(f"Cluster IDs saved: {group_ids_path}")
 
-    print("Loading SNOWPACK dataset...")
+    print("Loading SNOWPACK dataset (Zarr store is large — may take 30-60s)...")
     zarr_path = Path(args.zarr_path)
     if zarr_path.exists():
         _raw = xr.open_zarr(str(zarr_path))
@@ -716,6 +716,7 @@ def main():
 
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
+            print(f"    Loading {loc_mask.sum()} locations from Zarr...")
             ds_t = ds_group.sel(time=snap_ts, method='nearest').compute()
 
         rows = []
