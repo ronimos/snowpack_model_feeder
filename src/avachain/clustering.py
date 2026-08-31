@@ -159,9 +159,9 @@ def cluster_cells(hs_matrix: np.ndarray,
                   cell_indices: np.ndarray,
                   grid_shape: tuple,
                   n_clusters: int = 300,
-                  max_cells_per_cluster: int = 1000,
+                  max_cells_per_cluster: int = 20,
                   max_cluster_std_m: float = 0.05,  # 5 cm
-                  n_pca_components: float | int = 0.95, # 95% confidance interval, automatically determine number of components
+                  n_pca_components: float | int = 0.99, # 99% variance retained
                   min_cluster_size: int = 4,
                   enforce_contiguity: bool = True) -> np.ndarray:
     """
@@ -414,7 +414,7 @@ def compute_cluster_representatives(cluster_map: np.ndarray,
 
     return representatives
 
-def auto_select_n_clusters(n_cells: int, target_cells_per_cluster: int = 500) -> int:
+def auto_select_n_clusters(n_cells: int, target_cells_per_cluster: int = 50) -> int:
     """
     Heuristic: aim for ~target_cells_per_cluster cells per cluster.
     Bounded between 50 and 2000.

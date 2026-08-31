@@ -124,7 +124,7 @@ def build_zarr_cache(pro_dir: Path,
 
         with tempfile.TemporaryDirectory() as tmp:
             for f in batch_files:
-                os.symlink(str(f), os.path.join(tmp, f.name))
+                os.symlink(str(f.resolve()), os.path.join(tmp, f.name))
             t0 = time.time()
             try:
                 ds = xsnow.read(tmp, lazy=False, n_cpus_use=n_cpus)
@@ -191,14 +191,19 @@ def load_boundaries(project_dir: Path,
     from shapely.geometry import shape
     from shapely.ops import unary_union
 
-    t = Transformer.from_crs('EPSG:4326', f'EPSG:{target_epsg}',
-                              always_xy=True)
-
-    def to_utm(pts_lonlat):
-        return [t.transform(x, y) for x, y in pts_lonlat]
-
     bnd_dir    = project_dir / 'data' / 'boundaries'
     boundaries = {}
+
+    def _make_transformer(src_crs_str):
+        """Build a pyproj Transformer from a CRS string to target_epsg."""
+        return Transformer.from_crs(src_crs_str, f'EPSG:{target_epsg}',
+                                    always_xy=True)
+
+    # Transformer for the KML (always lon/lat WGS84)
+    t_lonlat = _make_transformer('EPSG:4326')
+
+    def to_utm(pts_lonlat):
+        return [t_lonlat.transform(x, y) for x, y in pts_lonlat]
 
     # --- Start zone KML ---
     kml_path = bnd_dir / 'Litte_prof_start_zone.kml'
@@ -216,17 +221,30 @@ def load_boundaries(project_dir: Path,
                 [y for x, y in utm])
 
     # --- Release area GeoJSON ---
-    gj_path = bnd_dir / 'avalanche_release_area.geojson'
-    if gj_path.exists():
+    # Try candidate filenames in priority order; first match wins.
+    _release_candidates = [
+        'avalanche_release_area.geojson',
+        'avalanche_release_area_hand_drawn.geojson',
+        'avalanche_release_area_20260118.geojson',
+    ]
+    gj_path = next((bnd_dir / n for n in _release_candidates
+                    if (bnd_dir / n).exists()), None)
+    if gj_path is not None:
         with open(str(gj_path)) as f:
             gj = json.load(f)
+
+        # Respect the CRS declared in the file; fall back to EPSG:4326 (the
+        # GeoJSON spec default) only when no crs block is present.
+        declared = (gj.get('crs') or {}).get('properties', {}).get('name', '')
+        src_crs = declared if declared else 'EPSG:4326'
+        t_gj = _make_transformer(src_crs)
 
         polys  = [shape(feat['geometry']) for feat in gj['features']]
         merged = unary_union(polys)
 
         def _reproj(poly):
             from shapely.geometry import Polygon, MultiPolygon
-            def ring(r): return to_utm(list(r.coords))
+            def ring(r): return [t_gj.transform(x, y) for x, y in r.coords]
             if poly.geom_type == 'Polygon':
                 return Polygon(ring(poly.exterior),
                                [ring(i) for i in poly.interiors])

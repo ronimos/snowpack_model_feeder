@@ -423,7 +423,8 @@ def step_scenarios(cfg, args):
           f"Sk38={list(triggers[sk38_col].round(3))}")
 
     # --- Output directory ---
-    out_dir = cfg.output_dir / "scenarios" / args.snapshot_date
+    base = cfg.output_dir / "scenarios" / args.snapshot_date
+    out_dir = base / args.forecast_horizon if args.forecast_horizon else base
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "scenarios").mkdir(exist_ok=True)
 
@@ -821,6 +822,11 @@ def main():
     #                         'probabilistic boundary model.')
 
     # scenarios
+    parser.add_argument('--forecast-horizon', default=None,
+                        help='Forecast horizon label (e.g. T_1, T_2). '
+                             'When set, scenarios are written to '
+                             'outputs/scenarios/YYYY-MM-DD/<horizon>/. '
+                             'Omit for T+0 (writes directly to YYYY-MM-DD/).')
     parser.add_argument('--n-triggers',    type=int,   default=None)
     parser.add_argument('--size-factors',  type=float, nargs='+',
                         default=None,
