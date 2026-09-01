@@ -642,6 +642,9 @@ def main():
                              'for use by the probabilistic boundary model.')
     parser.add_argument('--cross-date-test', action='store_true',
                         help='Train on snapshot date, score other survey dates')
+    parser.add_argument('--plots', action='store_true',
+                        help='Generate research plots (comparison, deviations, Meloche); '
+                             'off by default for operational runs')
     args = parser.parse_args()
 
     cfg = ProjectConfig(project_dir=Path(args.project_dir))
@@ -742,14 +745,12 @@ def main():
         if not df.empty:
             print(f"    {len(df)} clusters, {df.notna().all(axis=1).sum()} complete")
 
-    cfg.plots_dir.mkdir(parents=True, exist_ok=True)
-
-    # --- Statistical comparison plot ---
-    out_plot = cfg.plots_dir / f"release_zone_comparison_{snap_ts.date()}.png"
-    plot_snapshot_comparison(snap_data, out_plot, args.min_depth, snap_ts)
-
-    out_dev = cfg.plots_dir / f"release_zone_deviations_{snap_ts.date()}.png"
-    plot_snapshot_deviations(snap_data, out_dev, snap_ts, args.min_depth)
+    if args.plots:
+        cfg.plots_dir.mkdir(parents=True, exist_ok=True)
+        out_plot = cfg.plots_dir / f"release_zone_comparison_{snap_ts.date()}.png"
+        plot_snapshot_comparison(snap_data, out_plot, args.min_depth, snap_ts)
+        out_dev = cfg.plots_dir / f"release_zone_deviations_{snap_ts.date()}.png"
+        plot_snapshot_deviations(snap_data, out_dev, snap_ts, args.min_depth)
 
     # --- Classifier ---
     if args.classifier:
@@ -787,8 +788,9 @@ def main():
                     med = sub[col].median()
                     print(f"  {grp:10s} {col:15s}: median={med:.4f}")
 
-        # Plot Meloche comparison
-        plot_meloche_comparison(meloche_df, cfg.plots_dir, snap_ts)
+        if args.plots:
+            cfg.plots_dir.mkdir(parents=True, exist_ok=True)
+            plot_meloche_comparison(meloche_df, cfg.plots_dir, snap_ts)
 
     # --- Save feature table (release + adjacent + reference groups) ---
     out_csv = cfg.analysis_dir / f"release_zone_features_{snap_ts.date()}.csv"
