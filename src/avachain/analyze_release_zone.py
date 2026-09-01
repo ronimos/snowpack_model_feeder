@@ -658,7 +658,11 @@ def main():
     cluster_map = np.load(str(cfg.analysis_dir / "cluster_map.npy"))
 
     print("Building spatial masks...")
-    release_mask    = geojson_to_mask(geojson_path, dem.shape, transform)
+    if geojson_path.exists():
+        release_mask = geojson_to_mask(geojson_path, dem.shape, transform)
+    else:
+        print(f"  No release area geojson found at {geojson_path} — skipping validation grouping")
+        release_mask = np.zeros(dem.shape, dtype=bool)
     start_zone_mask = kml_to_mask(cfg.start_zone_kml, dem.shape, transform)
 
     print("Assigning clusters...")

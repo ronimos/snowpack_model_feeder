@@ -604,7 +604,7 @@ def propagate_release(
         raw = snap_features.loc[trigger_cluster_id, 'wl_shear_strength'] \
               if 'wl_shear_strength' in snap_features.columns else np.nan
         if isinstance(raw, pd.Series): raw = raw.iloc[0]
-        v = float(raw) * 1000.0   # kPa → Pa
+        v = float(raw)  # Pa (zarr units: Pa)
         tau_p_trigger = v if not np.isnan(v) and v > 0 else None
     if tau_p_trigger is None:
         print(f"    Warning: no tau_p for trigger {trigger_cluster_id}, "
@@ -732,14 +732,14 @@ def propagate_release(
             cur_cid = current_props.get('cid')
             xy_c    = centroids.get(cur_cid)
             xy_n    = centroids.get(cid)
-            tau_p_c = current_props.get('wl_shear_strength', np.nan)  # kPa
-            tau_p_n = nbr_props.get('wl_shear_strength', np.nan)      # kPa
+            tau_p_c = current_props.get('wl_shear_strength', np.nan)  # Pa
+            tau_p_n = nbr_props.get('wl_shear_strength', np.nan)      # Pa
             if (xy_c is not None and xy_n is not None
                     and not np.isnan(tau_p_c) and not np.isnan(tau_p_n)):
                 dist_cn = float(np.hypot(xy_n[0] - xy_c[0], xy_n[1] - xy_c[1]))
                 if dist_cn > 1e-6:
-                    # directed gradient toward stronger WL, Pa/m (tau_p is kPa)
-                    theta_dir = max(0.0, (tau_p_n - tau_p_c) * 1000.0 / dist_cn)
+                    # directed gradient toward stronger WL (Pa/m)
+                    theta_dir = max(0.0, (tau_p_n - tau_p_c) / dist_cn)
                     if theta_dir > 0.0:
                         Lam   = nbr_props.get('Lambda',  np.nan)
                         tg    = tau_g_nbr

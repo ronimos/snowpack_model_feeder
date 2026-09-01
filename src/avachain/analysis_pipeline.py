@@ -378,6 +378,28 @@ def step_scenarios(cfg, args):
 
     cand_df  = snap_features.loc[candidate_ids].copy()
     sk38_col = 'min_sk38' if 'min_sk38' in cand_df.columns else 'sk38_min'
+
+    # Join Pi1 from meloche features for propagation gate.
+    # A trigger that can't propagate (low Pi1) produces a degenerate release —
+    # good initiation potential (low Sk38) alone is not sufficient.
+    if not meloche_df.empty and 'Pi1_elastic' in meloche_df.columns:
+        pi1_vals = {}
+        for cid in cand_df.index:
+            if cid in meloche_df.index:
+                v = meloche_df.loc[cid, 'Pi1_elastic']
+                pi1_vals[cid] = float(v.iloc[0]) if isinstance(v, pd.Series) else float(v)
+        cand_df['Pi1_elastic'] = pd.Series(pi1_vals)
+
+        pi1_valid = cand_df['Pi1_elastic'].dropna()
+        if len(pi1_valid) > 0:
+            pi1_median = float(pi1_valid.median())
+            pi1_mean   = float(pi1_valid.mean())
+            pre_gate   = cand_df.dropna(subset=[sk38_col]).shape[0]
+            cand_df    = cand_df[cand_df['Pi1_elastic'] >= pi1_median]
+            print(f"  Pi1 propagation gate (>= median {pi1_median:.2f}, "
+                  f"mean {pi1_mean:.2f}): "
+                  f"{pre_gate} → {cand_df.shape[0]} candidates")
+
     triggers = (cand_df.dropna(subset=[sk38_col])
                        .nsmallest(args.n_triggers, sk38_col))
 

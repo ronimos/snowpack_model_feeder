@@ -242,8 +242,8 @@ def profile_features(ds_t_loc, min_depth_cm: float) -> dict:
     if slab_m is None:
         return result
 
-    # --- Stability at interface (±5cm window, z is in cm) ---
-    near_interface = ok & (np.abs(z - interface_z) <= 5.0) # TODO # Fix — ±5 cm 5.0
+    # --- Stability at interface (±5cm window) ---
+    near_interface = ok & (np.abs(z - interface_z) <= 0.05)
     for var in ('sk38', 'ssi', 'sn38', 'stab_deformation_rate'):
         try:
             v = ds_t_loc[var].values.ravel()
@@ -266,8 +266,8 @@ def profile_features(ds_t_loc, min_depth_cm: float) -> dict:
 
         # Slab thickness: distance from interface to snow surface
         slab_z = z[slab_m & ok]
-        # interface_z is in cm (negative from surface), convert to metres
-        result['slab_thickness'] = float(-interface_z / 100.0)                   if len(slab_z) else np.nan
+        # interface_z is in m (negative from surface)
+        result['slab_thickness'] = float(-interface_z)                   if len(slab_z) else np.nan
 
         # Most common grain type in slab (first digit = grain class)
         gt_slab = np.round(gt[slab_m & ok]).astype(int)
@@ -285,14 +285,14 @@ def profile_features(ds_t_loc, min_depth_cm: float) -> dict:
         result['has_crust']      = bool(is_crust.any())
         result['n_crust_layers'] = int(is_crust.sum())
         result['crust_thickness'] = float(
-            (z_slab_all[is_crust].max() - z_slab_all[is_crust].min()) / 100.0
+            (z_slab_all[is_crust].max() - z_slab_all[is_crust].min())
         ) if is_crust.any() else 0.0
         # Crust immediately above WL (<10cm of interface) — bridging layer
-        near_iface = np.abs(z_slab_all - interface_z) <= 10.0
+        near_iface = np.abs(z_slab_all - interface_z) <= 0.10
         result['crust_at_interface'] = bool((is_crust & near_iface).any())
         # Depth of shallowest crust (m below surface)
         result['crust_top_depth'] = float(
-            -z_slab_all[is_crust].max() / 100.0
+            -z_slab_all[is_crust].max()
         ) if is_crust.any() else np.nan
     else:
         for k in ('slab_density', 'slab_hand_hardness', 'slab_grain_size',
@@ -315,7 +315,7 @@ def profile_features(ds_t_loc, min_depth_cm: float) -> dict:
                 result[f'wl_{var}'] = np.nan
 
         wl_z = z[wl_m & ok]
-        result['wl_burial_depth'] = float(-wl_z.max() / 100.0)          if len(wl_z) else np.nan
+        result['wl_burial_depth'] = float(-wl_z.max())          if len(wl_z) else np.nan
         result['wl_thickness']    = float(wl_z.max() - wl_z.min())      if len(wl_z) else np.nan
         result['interface_z']     = float(interface_z)
 
@@ -340,11 +340,11 @@ def profile_features(ds_t_loc, min_depth_cm: float) -> dict:
     # --- Meloche et al. (2025) parameters (per-cluster, no neighbors needed) ---
     rho   = result.get('slab_density',      np.nan)
     h_m   = result.get('slab_thickness',    np.nan)   # m
-    D_wl  = result.get('wl_thickness',      np.nan)   # cm (from z)
+    D_wl  = result.get('wl_thickness',      np.nan)   # m (from z)
     tau_p = result.get('wl_shear_strength', np.nan)   # Pa
 
     if all(not np.isnan(v) for v in [rho, h_m, D_wl, tau_p]) and D_wl > 0:
-        D_wl_m  = D_wl / 100.0                           # cm -> m
+        D_wl_m  = D_wl                                    # already in m
         # Slab elastic modulus — power law fit to van Herwijnen et al. (2016) range
         # ~2 MPa at ρ=200, ~4 MPa at ρ=300, ~6 MPa at ρ=350 kg/m³
         E_slab  = (rho / 300.0)**2.5 * 4.0e6             # Pa
@@ -509,6 +509,7 @@ def compute_meloche_features(snap_data: dict, cluster_map: np.ndarray,
         return pd.DataFrame()
 
     features = pd.concat(all_rows)
+    features = features[~features.index.duplicated(keep='first')]
     if 'wl_shear_strength' not in features.columns:
         return pd.DataFrame()
 
@@ -530,9 +531,9 @@ def compute_meloche_features(snap_data: dict, cluster_map: np.ndarray,
             return float(val.iloc[0])
         return float(val)
 
-    # wl_shear_strength from SNOWPACK is in kPa; Meloche uses Pa
+    # wl_shear_strength is stored in Pa (zarr units: Pa)
     tau_p_arr = np.array([_scalar(features, c, 'wl_shear_strength')
-                          for c in cids_arr]) * 1000.0  # kPa -> Pa
+                          for c in cids_arr])
 
     # KNN for θ computation
     from sklearn.neighbors import NearestNeighbors
@@ -548,7 +549,7 @@ def compute_meloche_features(snap_data: dict, cluster_map: np.ndarray,
         row = (loc_data.iloc[0].copy()
                if isinstance(loc_data, pd.DataFrame)
                else loc_data.copy())
-        tau_p = row.get('wl_shear_strength', np.nan) * 1000.0  # kPa -> Pa
+        tau_p = row.get('wl_shear_strength', np.nan)  # Pa (zarr units: Pa)
         Lambda = row.get('Lambda', np.nan)
         E_slab = row.get('E_slab', np.nan)
         sigma_t = row.get('sigma_t', np.nan)
@@ -696,8 +697,8 @@ def reduce_scalars_at_time(ds: xr.Dataset,
             hs_bc     = xr.DataArray(hs_vals, dims=['location'])
             wl_zone   = (z_da < -0.8 * hs_bc) & ~np.isnan(z_da)
             slab_zone = (z_da > -0.8 * hs_bc) & (z_da < 0) & ~np.isnan(z_da)
-            wl_burial_raw  = hs_vals * 0.8 / 100.0
-            slab_thick_raw = hs_vals * 0.8 / 100.0
+            wl_burial_raw  = hs_vals * 0.8
+            slab_thick_raw = hs_vals * 0.8
         else:
             # Proper: FC/DH grain-type detection per cluster
             import sys as _sys
@@ -716,8 +717,8 @@ def reduce_scalars_at_time(ds: xr.Dataset,
                 if sm is not None:
                     wl_mask_np[li]   = wm
                     slab_mask_np[li] = sm
-                    wl_burial_raw[li]  = -iz / 100.0      # cm -> m
-                    slab_thick_raw[li] = -iz / 100.0
+                    wl_burial_raw[li]  = -iz               # already in m
+                    slab_thick_raw[li] = -iz
             wl_zone   = xr.DataArray(wl_mask_np,   dims=z_da.dims)
             slab_zone = xr.DataArray(slab_mask_np, dims=z_da.dims)
 
