@@ -635,11 +635,6 @@ def main():
                         help='Date for snapshot analysis (default: day before event)')
     parser.add_argument('--classifier', action='store_true',
                         help='Train RF classifier and plot feature importance')
-    parser.add_argument('--all-clusters', action='store_true',
-                        help='Also extract features for ALL start zone '
-                             'clusters (not just release+adjacent groups). '
-                             'Saves all_start_zone_features_YYYY-MM-DD.csv '
-                             'for use by the probabilistic boundary model.')
     parser.add_argument('--cross-date-test', action='store_true',
                         help='Train on snapshot date, score other survey dates')
     parser.add_argument('--plots', action='store_true',
@@ -805,89 +800,87 @@ def main():
         pd.concat(rows).to_csv(str(out_csv))
         print(f"Feature table saved: {out_csv}")
 
-    # --- All start zone clusters (for probabilistic boundary model) ---
-    if args.all_clusters:
-        print("\nExtracting features for ALL start zone clusters...")
-        print("(Required for probabilistic boundary model signed features)")
+    # --- All start zone clusters (always extracted; required by step_scenarios) ---
+    print("\nExtracting features for ALL start zone clusters...")
 
-        # All cluster IDs in start zone
-        all_sz_ids = set(int(c) for c in np.unique(cluster_map[start_zone_mask])
-                         if c > 0)
-        # Already-processed IDs
-        done_ids   = set()
-        for df in snap_data.values():
-            if not df.empty:
-                done_ids.update(df.index.tolist())
-        remaining_ids = all_sz_ids - done_ids
-        print(f"  Total start zone clusters: {len(all_sz_ids)}")
-        print(f"  Already processed:         {len(done_ids)}")
-        print(f"  Remaining to process:      {len(remaining_ids)}")
+    # All cluster IDs in start zone
+    all_sz_ids = set(int(c) for c in np.unique(cluster_map[start_zone_mask])
+                     if c > 0)
+    # Already-processed IDs (from release/adjacent/reference groups above)
+    done_ids   = set()
+    for df in snap_data.values():
+        if not df.empty:
+            done_ids.update(df.index.tolist())
+    remaining_ids = all_sz_ids - done_ids
+    print(f"  Total start zone clusters: {len(all_sz_ids)}")
+    print(f"  Already processed:         {len(done_ids)}")
+    print(f"  Remaining to process:      {len(remaining_ids)}")
 
-        loc_mask = np.array([
-            int(str(loc).split('_')[-1]) in remaining_ids
-            for loc in location_names])
+    loc_mask = np.array([
+        int(str(loc).split('_')[-1]) in remaining_ids
+        for loc in location_names])
 
-        all_rows = []
-        if loc_mask.any():
-            ds_all = ds.isel(location=loc_mask)
-            loc_ids_all = [int(str(loc).split('_')[-1])
-                           for loc in location_names[loc_mask]]
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore')
-                ds_t_all = ds_all.sel(
-                    time=snap_ts, method='nearest').compute()
-            n_all = ds_t_all.sizes.get('location', 1)
-            for i in range(n_all):
-                try:
-                    ds_loc = ds_t_all.isel(location=i) \
-                        if 'location' in ds_t_all.dims else ds_t_all
-                    feat = profile_features(ds_loc, args.min_depth)
-                    if feat:
-                        feat['cluster_id'] = loc_ids_all[i]
-                        feat['group']      = 'start_zone'
-                        all_rows.append(feat)
-                except Exception:
-                    continue
-            print(f"  Extracted features for {len(all_rows)} additional clusters")
+    all_rows = []
+    if loc_mask.any():
+        ds_all = ds.isel(location=loc_mask)
+        loc_ids_all = [int(str(loc).split('_')[-1])
+                       for loc in location_names[loc_mask]]
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            ds_t_all = ds_all.sel(
+                time=snap_ts, method='nearest').compute()
+        n_all = ds_t_all.sizes.get('location', 1)
+        for i in range(n_all):
+            try:
+                ds_loc = ds_t_all.isel(location=i) \
+                    if 'location' in ds_t_all.dims else ds_t_all
+                feat = profile_features(ds_loc, args.min_depth)
+                if feat:
+                    feat['cluster_id'] = loc_ids_all[i]
+                    feat['group']      = 'start_zone'
+                    all_rows.append(feat)
+            except Exception:
+                continue
+        print(f"  Extracted features for {len(all_rows)} additional clusters")
 
-        # Merge with existing snap_data and save
-        existing_rows = []
+    # Merge with existing snap_data and save
+    existing_rows = []
+    for grp, df in snap_data.items():
+        if df.empty: continue
+        df2 = df.copy(); df2['group'] = grp
+        existing_rows.append(df2)
+    all_dfs = existing_rows
+    if all_rows:
+        all_dfs.append(
+            pd.DataFrame(all_rows).set_index('cluster_id'))
+    if all_dfs:
+        all_features_df = pd.concat(all_dfs)
+        # Deduplicate — existing group assignments take priority
+        all_features_df = all_features_df[
+            ~all_features_df.index.duplicated(keep='first')]
+        out_all = (cfg.analysis_dir /
+                   f"all_start_zone_features_{snap_ts.date()}.csv")
+        all_features_df.to_csv(str(out_all))
+        print(f"  All start zone features saved: {out_all}")
+        print(f"  Total clusters: {len(all_features_df)}")
+
+    # Recompute Meloche features over full start zone
+    if all_dfs:
+        snap_data_full = {}
         for grp, df in snap_data.items():
-            if df.empty: continue
-            df2 = df.copy(); df2['group'] = grp
-            existing_rows.append(df2)
-        all_dfs = existing_rows
+            snap_data_full[grp] = df
         if all_rows:
-            all_dfs.append(
+            snap_data_full['start_zone'] = (
                 pd.DataFrame(all_rows).set_index('cluster_id'))
-        if all_dfs:
-            all_features_df = pd.concat(all_dfs)
-            # Deduplicate — existing group assignments take priority
-            all_features_df = all_features_df[
-                ~all_features_df.index.duplicated(keep='first')]
-            out_all = (cfg.analysis_dir /
-                       f"all_start_zone_features_{snap_ts.date()}.csv")
-            all_features_df.to_csv(str(out_all))
-            print(f"  All start zone features saved: {out_all}")
-            print(f"  Total clusters: {len(all_features_df)}")
-
-        # Recompute Meloche features over full start zone
-        if all_dfs:
-            snap_data_full = {}
-            for grp, df in snap_data.items():
-                snap_data_full[grp] = df
-            if all_rows:
-                snap_data_full['start_zone'] = (
-                    pd.DataFrame(all_rows).set_index('cluster_id'))
-            print("  Recomputing Meloche features over full start zone...")
-            meloche_full = compute_meloche_features(
-                snap_data_full, cluster_map, dem, transform, snap_ts)
-            if not meloche_full.empty:
-                out_mel_all = (cfg.analysis_dir /
-                               f"meloche_features_all_{snap_ts.date()}.csv")
-                meloche_full.to_csv(str(out_mel_all))
-                print(f"  Full Meloche features saved: {out_mel_all} "
-                      f"({len(meloche_full)} clusters)")
+        print("  Recomputing Meloche features over full start zone...")
+        meloche_full = compute_meloche_features(
+            snap_data_full, cluster_map, dem, transform, snap_ts)
+        if not meloche_full.empty:
+            out_mel_all = (cfg.analysis_dir /
+                           f"meloche_features_all_{snap_ts.date()}.csv")
+            meloche_full.to_csv(str(out_mel_all))
+            print(f"  Full Meloche features saved: {out_mel_all} "
+                  f"({len(meloche_full)} clusters)")
 
 
 if __name__ == '__main__':

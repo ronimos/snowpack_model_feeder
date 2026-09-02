@@ -202,17 +202,17 @@ def step_zarr_build(cfg, args):
 
 def step_analyze(cfg, args):
     """
-    Snapshot comparison and Meloche feature extraction.
+    Snapshot feature extraction.
 
-    Produces:
-        outputs/analysis/release_zone_features_YYYY-MM-DD.csv
-        outputs/analysis/meloche_features_YYYY-MM-DD.csv
+    Always produces:
+        outputs/analysis/all_start_zone_features_YYYY-MM-DD.csv
+        outputs/analysis/meloche_features_all_YYYY-MM-DD.csv
+
+    With --plots also produces:
         outputs/plots/release_zone_comparison_YYYY-MM-DD.png
         outputs/plots/release_zone_deviations_YYYY-MM-DD.png
         outputs/plots/meloche_comparison_YYYY-MM-DD.png
     """
-    # Delegate to analyze_release_zone diagnostic script for now.
-    # When plot functions are moved into analysis modules, call them directly.
     import subprocess
     script = Path(__file__).resolve().parent / "analyze_release_zone.py"
     cmd    = [sys.executable, str(script),
@@ -222,8 +222,8 @@ def step_analyze(cfg, args):
               '--snapshot-date', args.snapshot_date]
     if args.classifier:
         cmd.append('--classifier')
-    # if args.all_clusters:
-    #    cmd.append('--all-clusters')
+    if args.plots:
+        cmd.append('--plots')
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
@@ -753,7 +753,16 @@ def step_scenarios(cfg, args):
         },
     )
 
-    # --- Release comparison plot ---
+    # --- Release comparison plot (research/debug; skip in operational default) ---
+    if not args.plots:
+        print(f"\n{len(rows)} scenarios written → {out_dir}")
+        print(f"  Triggers: {len(triggers)}  "
+              f"Size factors: {len(args.size_factors)}  "
+              f"Depth pcts: {len(args.depth_pcts)}")
+        print(f"  A_ca range: {min(a_ca_list):.1f}–{max(a_ca_list):.1f} m")
+        print(f"  Density: {density_mean:.1f} ± {density_std:.1f} kg/m³")
+        return out_dir
+
     import traceback
     print(f"\nGenerating release comparison plot...")
     print(f"  median_polygons collected: {len(median_polygons)}")
@@ -837,11 +846,10 @@ def main():
 
     # analyze
     parser.add_argument('--classifier', action='store_true')
-    #parser.add_argument('--all-clusters', action='store_true',
-    #                    help='Extract features for ALL start zone clusters. '
-    #                         'Produces all_start_zone_features and '
-    #                         'meloche_features_all CSVs for the '
-    #                         'probabilistic boundary model.')
+    parser.add_argument('--plots', action='store_true',
+                        help='Generate research/diagnostic plots '
+                             '(analyze: comparison, deviations, Meloche; '
+                             'scenarios: release comparison). Off by default.')
 
     # scenarios
     parser.add_argument('--forecast-horizon', default=None,
