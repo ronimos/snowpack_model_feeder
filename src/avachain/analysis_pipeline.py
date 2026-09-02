@@ -2,11 +2,13 @@
 analysis_pipeline.py — Post-SNOWPACK analysis pipeline (Pipeline B).
 
 Steps (run after SNOWPACK finishes and Zarr cache is available):
-    zarr_build  Build / resume Zarr cache from .pro files
-    analyze     Snapshot comparison, Meloche features, deviation plots
-    scenarios   Generate AvaFrame com1DFA release scenario ensemble
+    cluster_update  Mid-season cluster splitting (run after new survey lands)
+    zarr_build      Build / resume Zarr cache from .pro files
+    analyze         Snapshot comparison, Meloche features, deviation plots
+    scenarios       Generate AvaFrame com1DFA release scenario ensemble
 
 Usage:
+    python analysis_pipeline.py cluster_update
     python analysis_pipeline.py zarr_build
     python analysis_pipeline.py analyze --snapshot-date 2026-01-18
     python analysis_pipeline.py scenarios --snapshot-date 2026-01-18
@@ -829,8 +831,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Post-SNOWPACK analysis pipeline (Pipeline B)")
     parser.add_argument('step',
-        choices=['zarr_build', 'analyze', 'scenarios', 'all'],
-        help="Pipeline step to run") 
+        choices=['cluster_update', 'zarr_build', 'analyze', 'scenarios', 'all'],
+        help="Pipeline step to run")
 
     # Common
     parser.add_argument('--project-dir', type=Path, default=Path('.'))
@@ -914,6 +916,11 @@ def main():
         args.xi = cfg.xi
     if args.stauchwall_deg is None:
         args.stauchwall_deg = cfg.stauchwall_deg
+
+    if args.step == 'cluster_update':
+        from cluster_update import step_cluster_update
+        step_cluster_update(cfg, args)
+        return
 
     if args.step in ('zarr_build', 'all'):
         step_zarr_build(cfg, args)

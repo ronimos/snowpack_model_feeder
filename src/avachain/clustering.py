@@ -421,3 +421,138 @@ def auto_select_n_clusters(n_cells: int, target_cells_per_cluster: int = 50) -> 
     """
     n = max(50, min(2000, n_cells // target_cells_per_cluster))
     return n
+
+
+# =====================================================================
+# Mid-season cluster quality assessment and splitting
+# =====================================================================
+
+def adaptive_split_threshold(median_hs_m: float,
+                              rel_frac: float = 0.10,
+                              min_abs: float = 0.03,
+                              max_abs: float = 0.12) -> float:
+    """
+    Adaptive HS std threshold for splitting (metres).
+
+    Scales with snow depth so shallow HS differences count more:
+        threshold = clip(rel_frac × median_hs, min_abs, max_abs)
+
+    At 30 cm HS → threshold = 3 cm (min clamp).
+    At 80 cm HS → threshold = 8 cm.
+    At 120+ cm HS → threshold = 12 cm (max clamp, upper snowpack still matters).
+    """
+    return float(np.clip(rel_frac * median_hs_m, min_abs, max_abs))
+
+
+def assess_cluster_quality(cluster_map: np.ndarray,
+                            survey_hs_matrix: np.ndarray,
+                            cell_indices: np.ndarray,
+                            rel_frac: float = 0.10,
+                            min_abs: float = 0.03,
+                            max_abs: float = 0.12,
+                            min_cluster_size: int = 4) -> list:
+    """
+    Assess each cluster's HS homogeneity against its adaptive threshold.
+
+    Parameters
+    ----------
+    cluster_map       : (nrows, ncols) cluster ID array
+    survey_hs_matrix  : (n_cells, n_surveys) HS values in metres
+    cell_indices      : (n_cells, 2) [row, col] matching survey_hs_matrix rows
+    rel_frac, min_abs, max_abs : adaptive threshold parameters (metres)
+    min_cluster_size  : clusters below 2× this cannot be split meaningfully
+
+    Returns
+    -------
+    list of dicts — one per cluster, sorted by cid, keys:
+        cid, n_cells, max_std, threshold, should_split
+    """
+    cid_per_cell = np.array([cluster_map[r, c] for r, c in cell_indices])
+    results = []
+    for cid in np.unique(cid_per_cell):
+        if cid == 0:
+            continue
+        sel = cid_per_cell == cid
+        n = int(sel.sum())
+        if n < 2 * min_cluster_size:
+            results.append({'cid': int(cid), 'n_cells': n,
+                            'max_std': 0.0, 'threshold': 0.0,
+                            'should_split': False})
+            continue
+        cluster_hs = survey_hs_matrix[sel]
+        median_hs = float(np.nanmedian(cluster_hs))
+        threshold = adaptive_split_threshold(median_hs, rel_frac, min_abs, max_abs)
+        per_survey_std = np.nanstd(cluster_hs, axis=0)
+        max_std = float(np.max(per_survey_std))
+        results.append({
+            'cid': int(cid),
+            'n_cells': n,
+            'max_std': round(max_std, 4),
+            'threshold': round(threshold, 4),
+            'should_split': bool(max_std > threshold),
+        })
+    return results
+
+
+def bisect_cluster(cluster_map: np.ndarray,
+                   cid: int,
+                   survey_hs_matrix: np.ndarray,
+                   cell_indices: np.ndarray,
+                   min_cluster_size: int = 4) -> tuple:
+    """
+    Split cluster ``cid`` into two children using 2-means on HS PCA.
+
+    Larger child (by pixel count) inherits ``cid``.
+    Smaller child gets ``cluster_map.max() + 1``.
+
+    Spatial contiguity is NOT re-enforced here to preserve existing cluster IDs.
+    Run enforce_spatial_contiguity on the full season's first clustering only.
+
+    Parameters
+    ----------
+    cluster_map      : (nrows, ncols) — modified in-place and returned
+    cid              : cluster ID to split
+    survey_hs_matrix : (n_cells, n_surveys) — rows match cell_indices
+    cell_indices     : (n_cells, 2) [row, col]
+    min_cluster_size : both children must have ≥ this many cells
+
+    Returns
+    -------
+    (updated_cluster_map, child_cid) on success, or (cluster_map, None) on failure.
+    """
+    cid_per_cell = np.array([cluster_map[r, c] for r, c in cell_indices])
+    sel_idx = np.where(cid_per_cell == cid)[0]
+    n = len(sel_idx)
+
+    if n < 2 * min_cluster_size:
+        return cluster_map, None
+
+    cluster_hs = survey_hs_matrix[sel_idx]  # (n_in_cluster, n_surveys)
+
+    n_comp = min(n - 1, cluster_hs.shape[1], 8)
+    if n_comp < 1:
+        return cluster_map, None
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        pca = PCA(n_components=n_comp)
+        features = pca.fit_transform(cluster_hs)
+
+    sub_km = MiniBatchKMeans(n_clusters=2, random_state=42, n_init=5)
+    sub_labels = sub_km.fit_predict(features)
+
+    n0 = int((sub_labels == 0).sum())
+    n1 = int((sub_labels == 1).sum())
+    if min(n0, n1) < min_cluster_size:
+        return cluster_map, None
+
+    child_cid = int(cluster_map.max()) + 1
+
+    # Larger child keeps parent cid; minority group gets child_cid
+    keep_label = 0 if n0 >= n1 else 1
+    for i, idx in enumerate(sel_idx):
+        if sub_labels[i] != keep_label:
+            r, c = cell_indices[idx]
+            cluster_map[r, c] = child_cid
+
+    return cluster_map, child_cid
