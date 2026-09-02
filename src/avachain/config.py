@@ -72,6 +72,12 @@ class ProjectConfig:
     # --- Domain mask ---
     min_slope_deg: float = 15.0
 
+    # --- Avalanche / scour event detection ---
+    frac_loss_threshold: float = 0.60   # start-zone loss fraction above which event is settlement/melt
+    min_scour_depth_m: float = 0.05     # minimum ΔHS loss to count a cell as "losing" snow
+    caic_obs_window_days: int = 3       # ± days around period midpoint to search CAIC API
+    caic_spatial_buffer_m: float = 200.0  # buffer around KML polygon for CAIC obs matching
+
     # --- Clustering ---
     target_cells_per_cluster: int = 50  # auto-determines initial cluster count
     max_cells_per_cluster: int = 20     # recursively split clusters larger than this
@@ -95,6 +101,10 @@ class ProjectConfig:
     @property
     def boundaries_dir(self) -> Path:
         return self.project_dir / "data" / "boundaries"
+
+    @property
+    def avalanche_events_path(self) -> Path:
+        return self.boundaries_dir / "avalanche_events.json"
 
     def release_geojsons_for_date(self, snapshot_date: str) -> list:
         """

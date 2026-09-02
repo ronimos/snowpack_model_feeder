@@ -379,7 +379,7 @@ def main():
             print(f"  {pid}: {len(obs_list)} obs — {', '.join(sizes)} [{', '.join(triggers)}]")
 
     # Load existing manual events
-    events_path = cfg.project_dir / "data" / "boundaries" / "avalanche_events.json"
+    events_path = cfg.avalanche_events_path
     existing = []
     if events_path.exists():
         with open(str(events_path)) as f:

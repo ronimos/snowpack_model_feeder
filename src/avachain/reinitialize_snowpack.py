@@ -199,7 +199,8 @@ def run_reinit(cfg,
                threshold_sigma: float = 1.2,
                sno_dir: Path = None,
                dry_run: bool = False,
-               no_backup: bool = False) -> dict:
+               no_backup: bool = False,
+               clean_window_max_stn_dhs_m: float = 0.05) -> dict:
     """
     Post-avalanche SNOWPACK reinitialization.
 
@@ -218,6 +219,10 @@ def run_reinit(cfg,
     sno_dir : directory with _res.sno files (default: cfg.pro_dir)
     dry_run : if True, report without modifying files
     no_backup : if True, skip .sno.bak creation
+    clean_window_max_stn_dhs_m : max station dHS (m) between event_date and
+        date_after that qualifies as a "clean window".  When clean, cluster-mean
+        HS from the post-event UAS survey is used as the scour target instead of
+        the modeled slab thickness.  Default 0.05 m (5 cm).
 
     Returns
     -------
@@ -327,6 +332,43 @@ def run_reinit(cfg,
         print(f"  WARNING: {feat_csv.name} not found, "
               f"using 80% of HS as scour depth")
 
+    # --- Post-event survey HS per cluster (Priority 1 scour source) ---
+    # Use cluster-mean HS from the post-event UAS grid when the window
+    # between the event and the survey is free of new snow (clean window).
+    hs_after_path = cfg.resampled_dir / f"hs_{date_after}.npy"
+    post_survey_hs = {}   # cid -> cluster-mean observed HS on date_after
+    clean_window = False
+
+    if hs_after_path.exists():
+        hs_post = np.load(str(hs_after_path)).astype(np.float32)
+        for cid in release_cids:
+            cell_mask = (cluster_map == cid)
+            vals = hs_post[cell_mask & (hs_post > 0) & ~np.isnan(hs_post)]
+            if vals.size > 0:
+                post_survey_hs[cid] = float(np.nanmean(vals))
+
+        # Station dHS from event_date to date_after to judge window cleanliness
+        try:
+            wx = pd.read_csv(str(cfg.weather_csv), parse_dates=[0], index_col=0)
+            hs_col = wx.iloc[:, 11]
+            window = hs_col.loc[event_date:date_after]
+            if len(window) >= 2:
+                stn_new = float((window.iloc[-1] - window.iloc[0]) * 0.1 * 2.54)
+                clean_window = stn_new < clean_window_max_stn_dhs_m
+                print(f"  Post-event stn_dHS={stn_new:.3f}m  "
+                      f"window={'clean' if clean_window else 'contaminated, using slab_thickness'}")
+            else:
+                print("  Insufficient station data for clean-window check "
+                      "— using slab_thickness")
+        except Exception as exc:
+            print(f"  Weather CSV error ({exc}) — using slab_thickness")
+
+        print(f"  Post-survey HS available: "
+              f"{len(post_survey_hs)}/{len(release_cids)} clusters")
+    else:
+        print(f"  {hs_after_path.name} not found — "
+              f"scour from slab_thickness or HS×0.80")
+
     # --- Scour .sno files ---
     print(f"\nEvent timestamp: {event_ts}")
     print(f"SNO directory: {sno_dir}")
@@ -354,7 +396,18 @@ def run_reinit(cfg,
         hs_before_scour = sum(float(l['Layer_Thick'])
                               for l in sno_data['layers'])
 
-        if cid in slab_thickness:
+        if clean_window and cid in post_survey_hs:
+            candidate = hs_before_scour - post_survey_hs[cid]
+            if candidate > 0:
+                scour_m = candidate
+                source = 'survey_HS'
+            elif cid in slab_thickness:
+                scour_m = slab_thickness[cid]
+                source = 'features'
+            else:
+                scour_m = hs_before_scour * 0.80
+                source = 'HS×0.80'
+        elif cid in slab_thickness:
             scour_m = slab_thickness[cid]
             source = 'features'
         else:
@@ -410,6 +463,54 @@ def run_reinit(cfg,
               f"range=[{min(scour_depths):.2f}, {max(scour_depths):.2f}]m")
         print(f"  HS after:    median={np.median(hs_afters):.2f}m  "
               f"range=[{min(hs_afters):.2f}, {max(hs_afters):.2f}]m")
+
+    # --- Validation: compare reinitialized HS against post-event survey HS ---
+    val_flag_threshold_m = 0.10
+    if post_survey_hs and stats:
+        val_records = []
+        flagged = []
+        for s in stats:
+            cid = s['cid']
+            if cid not in post_survey_hs:
+                continue
+            survey_hs = post_survey_hs[cid]
+            residual  = s['hs_after_m'] - survey_hs
+            rec = {
+                'cid':          cid,
+                'hs_after_m':   s['hs_after_m'],
+                'survey_hs_m':  round(survey_hs, 4),
+                'residual_m':   round(residual, 4),
+                'scour_source': s['scour_source'],
+                'flag':         abs(residual) > val_flag_threshold_m,
+            }
+            val_records.append(rec)
+            if rec['flag']:
+                flagged.append(rec)
+
+        if val_records:
+            residuals = [r['residual_m'] for r in val_records]
+            print(f"\nPost-reinit validation ({len(val_records)} clusters):")
+            print(f"  Residual (model−survey):  "
+                  f"median={np.median(residuals):+.3f}m  "
+                  f"range=[{min(residuals):+.3f}, {max(residuals):+.3f}]m")
+            if flagged:
+                print(f"  Flagged (|res| > {val_flag_threshold_m:.2f}m): "
+                      f"{len(flagged)} cluster(s)")
+                for r in flagged:
+                    print(f"    cluster {r['cid']:04d}: "
+                          f"model={r['hs_after_m']:.2f}m  "
+                          f"survey={r['survey_hs_m']:.2f}m  "
+                          f"res={r['residual_m']:+.3f}m  "
+                          f"[{r['scour_source']}]")
+            else:
+                print(f"  All residuals within ±{val_flag_threshold_m:.2f}m")
+
+            for s, v in zip(
+                    [s for s in stats if s['cid'] in {r['cid'] for r in val_records}],
+                    val_records):
+                s['survey_hs_m'] = v['survey_hs_m']
+                s['residual_m']  = v['residual_m']
+                s['validation_flag'] = v['flag']
 
     if stats and not dry_run:
         stats_path = cfg.analysis_dir / f"reinit_stats_{event_date}.json"

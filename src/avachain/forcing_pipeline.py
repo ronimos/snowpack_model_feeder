@@ -519,14 +519,29 @@ def step_validate(cfg: ProjectConfig):
 
 def step_avalanche(cfg: ProjectConfig):
     """
-    Detect and correct avalanche events in transport fields.
+    Classify inter-survey periods and correct transport fields.
 
-    Two modes:
-      - If data/boundaries/avalanche_events.json exists: use known events
-        to delineate crowns and correct transport (MANUAL mode)
-      - Always: scan all periods and report candidates (AUTO mode)
+    Classification (per start-zone frac_loss + crown detection):
+      frac_loss = fraction of start-zone cells with ΔHS < -min_scour_depth_m
 
-    Manual events file format: see avalanche.py docstring.
+      if frac_loss < frac_loss_threshold (0.60) OR crown detected:
+          → localized mass removal (avalanche or wind_scour)
+          → label: "avalanche" if manual known_events or CAIC API obs match,
+                   else "wind_scour"
+      else:
+          → settlement_melt — no reinit, no transport correction
+
+    For avalanche (crown detected):
+        - Correct transport field, save avalanche_dhs, export crown GeoJSON
+        - reinit_needed = True, transport_corrected = True
+
+    For wind_scour (no crown, but localized loss):
+        - Export loss-cell GeoJSON (for cluster reinit target)
+        - reinit_needed = True, transport_corrected = False
+        - Transport field is NOT corrected (wind redistribution is real signal)
+
+    Auto-detected events are appended to avalanche_events.json so they
+    become known on subsequent runs.
     """
     cfg.ensure_dirs()
 
@@ -534,33 +549,61 @@ def step_avalanche(cfg: ProjectConfig):
         delineate_crown, load_known_events,
         separate_avalanche_from_wind
     )
+    from snowpack_io import kml_to_mask
+    from datetime import datetime as _dt, timedelta as _td
 
     dem, transform, crs = load_dem(cfg)
     transport_meta = load_transport_meta(cfg)
     valid_dem = ~np.isnan(dem)
 
-    known_events_path = cfg.project_dir / "data" / "boundaries" / "avalanche_events.json"
-    known_events = load_known_events(str(known_events_path))
-    if known_events:
-        print(f"Loaded {len(known_events)} known avalanche event(s) from "
-              f"{known_events_path.name}")
-        for ev in known_events:
-            print(f"  {ev.get('period', '?')}: {ev.get('size', '?')} "
-                  f"({ev.get('trigger', '?')}), {ev.get('timestamp', '?')}")
-    else:
-        print(f"No known events file at {known_events_path}")
-        print("  To specify known events, create this file. See avalanche.py for format.")
+    # Start-zone mask for frac_loss
+    start_zone_mask = kml_to_mask(cfg.start_zone_kml, dem.shape, transform)
 
-    print(f"\nScanning {len(transport_meta)} periods for avalanche signatures...")
+    # Manual known events (manual label takes precedence over auto-detect)
+    known_events = (load_known_events(str(cfg.avalanche_events_path))
+                    if cfg.avalanche_events_path.exists() else [])
+    known_periods = {ev.get('period') for ev in known_events}
+    if known_events:
+        print(f"Loaded {len(known_events)} known event(s) from "
+              f"{cfg.avalanche_events_path.name}")
+    else:
+        print("No known events file — all events auto-detected")
+
+    # One-shot CAIC API fetch for the full season date range
+    all_caic_obs = []
+    try:
+        from fetch_avalanche_obs import (
+            fetch_observations, extract_observation, filter_to_boundary
+        )
+        all_dates = sorted(
+            {m['date_a'] for m in transport_meta} |
+            {m['date_b'] for m in transport_meta}
+        )
+        season_start = (_dt.strptime(all_dates[0],  '%Y-%m-%d')
+                        - _td(days=cfg.caic_obs_window_days))
+        season_end   = (_dt.strptime(all_dates[-1], '%Y-%m-%d')
+                        + _td(days=cfg.caic_obs_window_days))
+        raw_obs = fetch_observations(season_start, season_end)
+        all_caic_obs = [extract_observation(r) for r in raw_obs]
+        if cfg.boundary_kml.exists():
+            all_caic_obs = filter_to_boundary(
+                all_caic_obs, str(cfg.boundary_kml),
+                buffer_m=cfg.caic_spatial_buffer_m)
+        print(f"CAIC API: {len(all_caic_obs)} observations in study area")
+    except Exception as exc:
+        print(f"  CAIC API unavailable ({exc}) — auto events labeled 'wind_scour'")
+
+    print(f"\nScanning {len(transport_meta)} periods...")
     period_results = {}
     corrected_periods = {}
+    new_auto_events = []
 
     for meta in transport_meta:
         if not meta.get('has_weather', True):
             continue
         pair_id = meta['pair_id']
         d_a, d_b = meta['date_a'], meta['date_b']
-        stn_dhs = meta.get('stn_dhs') or 0
+        stn_dhs  = meta.get('stn_dhs') or 0
 
         hs_a_path = cfg.resampled_dir / f"hs_{d_a}.npy"
         hs_b_path = cfg.resampled_dir / f"hs_{d_b}.npy"
@@ -569,27 +612,78 @@ def step_avalanche(cfg: ProjectConfig):
 
         hs_a = np.clip(np.load(str(hs_a_path)), 0, None)
         hs_b = np.clip(np.load(str(hs_b_path)), 0, None)
+        dhs  = hs_b - hs_a
 
-        regions = delineate_crown(hs_a, hs_b, dem, stn_dhs)
-        is_known = any(ev.get('period') == pair_id for ev in known_events)
+        # --- frac_loss ---
+        valid_sz = start_zone_mask & ~np.isnan(hs_a) & ~np.isnan(hs_b)
+        n_valid  = int(valid_sz.sum())
+        frac_loss = (float(((dhs < -cfg.min_scour_depth_m) & valid_sz).sum()) / n_valid
+                     if n_valid > 0 else 0.0)
+
+        # --- Crown detection (always, regardless of frac_loss) ---
+        regions   = delineate_crown(hs_a, hs_b, dem, stn_dhs)
+        has_crown = bool(regions)
+
+        # --- Classification ---
+        is_known      = pair_id in known_periods
+        crown_override = has_crown and frac_loss >= cfg.frac_loss_threshold
+        is_candidate  = frac_loss < cfg.frac_loss_threshold or has_crown
 
         period_results[pair_id] = {
-            'regions': regions,
-            'is_known': is_known,
-            'stn_dhs': stn_dhs,
+            'regions':   regions,
+            'is_known':  is_known,
+            'stn_dhs':   stn_dhs,
+            'frac_loss': round(frac_loss, 3),
+            'has_crown': has_crown,
         }
 
-        if regions:
-            r = regions[0]
-            flag = " *** KNOWN EVENT ***" if is_known else ""
-            print(f"  {pair_id}: {len(regions)} region(s), "
-                  f"largest={r['n_cells']} cells "
-                  f"(crown={r['n_crown_cells']}, flank={r['n_flank_cells']}), "
-                  f"vol={r['volume_m3']:.0f}m³{flag}")
-        else:
-            print(f"  {pair_id}: no avalanche-like regions")
+        if not is_candidate:
+            print(f"  {pair_id}: settlement_melt  "
+                  f"frac_loss={frac_loss:.2f}")
+            continue
 
-        if is_known and regions:
+        # --- Determine label via CAIC lookup ---
+        if is_known:
+            label = 'avalanche'
+            period_caic = []
+        else:
+            t_lo = _dt.strptime(d_a, '%Y-%m-%d') - _td(days=cfg.caic_obs_window_days)
+            t_hi = _dt.strptime(d_b, '%Y-%m-%d') + _td(days=cfg.caic_obs_window_days)
+            period_caic = [
+                o for o in all_caic_obs
+                if o.get('date_parsed') and
+                t_lo <= o['date_parsed'].replace(tzinfo=None) <= t_hi
+            ]
+            label = 'avalanche' if period_caic else 'wind_scour'
+
+        override_note = " *** CROWN OVERRIDE (widespread) ***" if crown_override else ""
+        known_note    = " *** KNOWN ***" if is_known else ""
+
+        if has_crown:
+            r = regions[0]
+            print(f"  {pair_id}: {label}  frac_loss={frac_loss:.2f}  "
+                  f"{len(regions)} region(s)  largest={r['n_cells']} cells "
+                  f"(crown={r['n_crown_cells']}, flank={r['n_flank_cells']})"
+                  f"{known_note}{override_note}")
+        else:
+            print(f"  {pair_id}: {label}  frac_loss={frac_loss:.2f}  "
+                  f"no crown (wind_scour inferred){known_note}")
+
+        # --- Mid-period timestamp (fallback for auto events) ---
+        if is_known:
+            known_ev = next(ev for ev in known_events if ev.get('period') == pair_id)
+            event_ts = known_ev.get('timestamp', None)
+        else:
+            mid = (_dt.strptime(d_a, '%Y-%m-%d') +
+                   (_dt.strptime(d_b, '%Y-%m-%d') -
+                    _dt.strptime(d_a, '%Y-%m-%d')) / 2)
+            event_ts = mid.strftime('%Y-%m-%dT12:00:00Z')
+
+        event_date_str = (pd.Timestamp(event_ts).strftime('%Y%m%d')
+                         if event_ts else d_b.replace('-', ''))
+
+        # === AVALANCHE path (crown detected) ===
+        if has_crown:
             combined_mask = np.zeros(dem.shape, dtype=bool)
             for r in regions:
                 combined_mask |= r['mask']
@@ -597,46 +691,93 @@ def step_avalanche(cfg: ProjectConfig):
             transport_path = cfg.analysis_dir / f"transport_smooth_{pair_id}.npy"
             if transport_path.exists():
                 transport = np.load(str(transport_path))
-                avy_dhs, corrected = separate_avalanche_from_wind(
+                avy_dhs, corrected_transport = separate_avalanche_from_wind(
                     transport, combined_mask, valid_dem)
-
                 np.save(str(cfg.analysis_dir / f"transport_corrected_{pair_id}.npy"),
-                        corrected)
+                        corrected_transport)
                 np.save(str(cfg.analysis_dir / f"avalanche_dhs_{pair_id}.npy"), avy_dhs)
-
-                known_ev = next(ev for ev in known_events if ev.get('period') == pair_id)
-                event_ts = known_ev.get('timestamp', None)
-
-                corrected_periods[pair_id] = {
-                    'n_regions': len(regions),
-                    'total_cells': int(combined_mask.sum()),
-                    'total_volume_m3': float(np.nansum(avy_dhs[combined_mask])),
-                    'corrected': True,
-                    'event_timestamp': event_ts,
-                }
                 print(f"    → Transport corrected, {combined_mask.sum()} cells")
 
-                # Export release mask as GeoJSON for dynamic group assignment
-                event_date_str = (pd.Timestamp(event_ts).strftime('%Y%m%d')
-                                  if event_ts else d_b.replace('-', ''))
-                gj_out = (cfg.boundaries_dir /
-                          f"avalanche_release_area_{event_date_str}.geojson")
-                if not gj_out.exists():
-                    _mask_to_geojson_wgs84(combined_mask, transform, crs, gj_out)
-                    print(f"    → Release mask exported: {gj_out.name}")
+            corrected_periods[pair_id] = {
+                'n_regions':           len(regions),
+                'total_cells':         int(combined_mask.sum()),
+                'total_volume_m3':     float(np.nansum(avy_dhs[combined_mask]))
+                                       if transport_path.exists() else 0.0,
+                'corrected':           True,
+                'transport_corrected': True,
+                'reinit_needed':       True,
+                'event_timestamp':     event_ts,
+                'label':               label,
+                'frac_loss':           round(frac_loss, 3),
+            }
+            event_mask = combined_mask
 
+        # === WIND SCOUR path (no crown, localized loss) ===
+        else:
+            event_mask = (dhs < -cfg.min_scour_depth_m) & valid_sz
+            corrected_periods[pair_id] = {
+                'n_regions':           0,
+                'total_cells':         int(event_mask.sum()),
+                'total_volume_m3':     float(np.nansum(dhs[event_mask])),
+                'corrected':           False,
+                'transport_corrected': False,
+                'reinit_needed':       True,
+                'event_timestamp':     event_ts,
+                'label':               'wind_scour',
+                'frac_loss':           round(frac_loss, 3),
+            }
+            print(f"    → Loss mask: {event_mask.sum()} cells  [no transport correction]")
+
+        # --- Export event GeoJSON ---
+        gj_out = cfg.boundaries_dir / f"avalanche_release_area_{event_date_str}.geojson"
+        if not gj_out.exists():
+            _mask_to_geojson_wgs84(event_mask, transform, crs, gj_out)
+            print(f"    → Event mask exported: {gj_out.name}")
+
+        # --- Auto-append to avalanche_events.json ---
+        if not is_known:
+            new_auto_events.append({
+                'period':    pair_id,
+                'timestamp': event_ts,
+                'label':     label,
+                'size':      'unknown',
+                'trigger':   'natural' if label == 'avalanche' else 'auto_detect',
+                'source':    'auto_detect' + (' + CAIC API' if period_caic else ''),
+                'frac_loss': round(frac_loss, 3),
+                'n_regions': len(regions),
+                'notes':     (f"Auto-detected. frac_loss={frac_loss:.2f}"
+                              + override_note),
+            })
+
+    # --- Write outputs/analysis/avalanche_events.json ---
     avy_output = {}
-    for pair_id in period_results:
+    for pair_id, pr in period_results.items():
         if pair_id in corrected_periods:
             avy_output[pair_id] = corrected_periods[pair_id]
         else:
-            avy_output[pair_id] = {'n_regions': 0, 'corrected': False}
+            avy_output[pair_id] = {
+                'n_regions':   0,
+                'corrected':   False,
+                'reinit_needed': False,
+                'frac_loss':   pr['frac_loss'],
+                'label':       'settlement_melt',
+            }
 
     with open(str(cfg.analysis_dir / "avalanche_events.json"), 'w') as f:
         json.dump(avy_output, f, indent=2)
 
+    # --- Append new auto-events to data/boundaries/avalanche_events.json ---
+    if new_auto_events:
+        all_events = list(known_events) + new_auto_events
+        with open(str(cfg.avalanche_events_path), 'w') as f:
+            json.dump(all_events, f, indent=2)
+        print(f"\n{len(new_auto_events)} new event(s) appended to "
+              f"{cfg.avalanche_events_path.name}")
+
     n_corrected = sum(1 for v in avy_output.values() if v.get('corrected'))
-    print(f"\nAvalanche step complete: {n_corrected} period(s) corrected")
+    n_reinit    = sum(1 for v in avy_output.values() if v.get('reinit_needed'))
+    print(f"\nAvalanche step complete: {n_corrected} transport correction(s), "
+          f"{n_reinit} reinit candidate(s)")
 
     plot_avalanche_results(period_results, corrected_periods, dem, transform, cfg)
 
@@ -1032,11 +1173,12 @@ def step_reinit(cfg: ProjectConfig):
             avy_events = json.load(f)
 
         corrected = sorted(
-            [(pid, ev) for pid, ev in avy_events.items() if ev.get('corrected')],
+            [(pid, ev) for pid, ev in avy_events.items()
+             if ev.get('reinit_needed', ev.get('corrected', False))],
             key=lambda x: x[1].get('event_timestamp', ''),
         )
         if not corrected:
-            print("No corrected events found in avalanche_events.json.")
+            print("No reinit_needed events found in avalanche_events.json.")
             return
 
         print(f"Multi-event reinit: {len(corrected)} event(s)")
