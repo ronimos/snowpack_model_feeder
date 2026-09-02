@@ -186,18 +186,62 @@ Design and implement a daily-run operational pipeline that provides continuous h
 
 ### Cluster management
 
-- [ ] **Mid-season cluster splitting with inheritance** — when a new survey reveals that a cluster's internal HS variability exceeds `max_cluster_std_m`, the cluster is split via MiniBatchKMeans bisection (same as initial clustering). One child inherits the parent's identity: same cluster ID, `.sno` restart file, `.smet`, `.pro` history, and Zarr entries. Nothing changes for this child — it continues seamlessly. The other child is new and needs:
-  1. A copy of the parent's `.sno` at the split timestamp (same stratigraphy — they were one cluster until the survey showed they're different)
-  2. A new SMET generated from the gap-filled hourly HS for the new child's pixel membership
+- [ ] **Mid-season cluster splitting with inheritance** — when a new survey reveals that a cluster's internal HS variability exceeds the adaptive threshold (see below), split via MiniBatchKMeans bisection. One child inherits the parent's identity: same cluster ID, `.sno` restart file, `.smet`, `.pro` history, and Zarr entries — continues seamlessly. The other child is new and needs:
+  1. A copy of the parent's `.sno` at the split timestamp (same stratigraphy — they were one cluster until the survey revealed heterogeneity)
+  2. A new SMET generated from gap-filled hourly HS for the new child's pixel membership
   3. SNOWPACK run from the split date forward (incremental from the copied `.sno`)
-  
-  The secondary child starts with the correct stratigraphy and only diverges from the split point. This is cheaper than rerunning from season start and physically justified — the snowpack was identical until the survey revealed heterogeneity.
-  
-  Implementation considerations:
-  - Cluster IDs for new children must not collide with existing IDs (use max_existing_id + 1)
-  - The cluster map raster needs updating (remap parent pixels to two children)
-  - The neighbour graph (k=8) needs rebuilding for affected clusters
-  - Downstream consumers (release geometry, boundary model) pick up the new cluster map automatically
-  - Track split lineage in a `cluster_splits.json` for provenance
 
-- [ ] **Cluster quality monitoring** — track intra-cluster HS variability at each new survey. Flag clusters exceeding `max_cluster_std_m` (8 cm) as split candidates. Report statistics: how many clusters need splitting, where on the slope, and how much the splitting would change the cluster count. This provides a data-driven trigger for when splitting is needed rather than arbitrary re-clustering.
+  **Adaptive split threshold** — fixed `max_cluster_std_m` is too aggressive in early season (when HS is shallow, small absolute std matters more) and too permissive in deep snow. Use a relative threshold with floor and ceiling:
+  ```
+  threshold = clip(rel_frac × median_HS, min=min_abs, max=max_abs)
+  ```
+  Suggested starting values: `rel_frac=0.10`, `min_abs=0.03 m` (noise floor — UAV SfM has ~2–3 cm registration error), `max_abs=0.12 m`. At HS=30 cm → 3 cm threshold; HS=80 cm → 8 cm (same as current fixed); HS=200 cm → 12 cm (saturates). These are uncalibrated — tune against actual survey variability.
+
+  Implementation considerations:
+  - Child identity rule: larger pixel-count child inherits parent ID; smaller child gets `max_existing_id + 1`. If equal size, closest-centroid inherits.
+  - Cluster map raster updated in-place; neighbour graph rebuilt only for affected clusters
+  - Downstream consumers (release geometry, boundary model) pick up new cluster map automatically
+  - Track split lineage in `cluster_splits.json`: `{new_id: {parent_id, split_date, split_survey_path, parent_pixels, child_pixels}}`
+  - Guard against infinite splitting: if a child would fall below `min_cluster_size` (currently 4 pixels), abort the split for that cluster
+
+- [ ] **Cluster quality monitoring** — at each new survey, compute per-cluster HS std using the adaptive threshold above. Report: how many clusters exceed threshold (split candidates), current total cluster count, mean/median cluster size, size distribution histogram. Log to `outputs/analysis/cluster_quality_YYYY-MM-DD.json`. Flag if total cluster count has grown by >50% since season start (signals aggressive splitting or poor initial clustering — tighten initial parameters next season).
+
+- [ ] **Mid-season cluster merging** — when two neighboring clusters have converged to similar HS trajectories across all surveys to date, merge them into one. This is the counterpart to splitting and can reduce cluster count bloat from aggressive early-season splitting or from surveys that revealed heterogeneity that later homogenized (e.g., large uniform snowfall event).
+
+  **Physical justification for mid-season merging:** HS is the *only* cluster-varying SNOWPACK input (temperature, wind, radiation, new snow all come from the shared weather station). Therefore HS trajectory similarity across the full seasonal vector genuinely implies SNOWPACK stratigraphy similarity — not just current-snapshot similarity. Two clusters that are merge candidates have been receiving nearly identical forcing throughout the season, so their `.sno` stratigraphies should be close.
+
+  **Merge trigger — what to compare:**
+  - Primary: similarity of full seasonal HS vectors in PCA space (same feature space used for initial clustering). Require distance below a merge threshold in the *original* high-dimensional space (not just the reduced PCA space — PCA compression can mask early-season differences that still matter).
+  - Secondary / validation: compare `.sno` files directly. Key variables to diff: layer count, `grain_type` sequence, `shear_strength` profile, `density` profile, `temperature` profile at the WL depth. If `.sno` diff exceeds a tolerance on any of these, don't merge even if HS vectors look similar. This guards against cases where PCA compressed away a meaningful early-season divergence. Exact tolerances TBD — need to examine actual `.sno` output format and decide which variables are load-bearing for stability metrics.
+  - Both criteria must pass: HS trajectory AND `.sno` profile similarity.
+
+  **Merge procedure:**
+  1. Pick the larger cluster as the "survivor" (inherits its ID)
+  2. Reassign all pixels of the smaller cluster to the survivor's cluster map entry
+  3. Generate merged SMET: pixel-membership-weighted average of both clusters' HS histories for all surveys to date, then rerun gap-fill for the merged pixel set
+  4. Rerun SNOWPACK from season start to current date using the merged SMET (in background — see below). Since HS trajectories were similar, the merged stratigraphy should closely match either original. The survivor's `.sno` can be used as a reference to validate the rerun output before swapping.
+  5. Atomic swap when background rerun completes: replace survivor's `.sno` with merged output, update cluster map, rebuild neighbour graph, update `cluster_splits.json` lineage.
+  6. The smaller cluster's ID is retired (mark in lineage log, never reuse).
+
+  **Conservative merge criteria:** merge only if the merge would reduce cluster count (don't merge if it would trigger an immediate re-split). Require similarity across the full seasonal vector, not just recent surveys — early-season divergences that later converged are still reflected in the stratigraphy. A cluster pair that diverged in December and converged in February should not be merged: their WL stratigraphy from December is different, and that's exactly what stability metrics depend on.
+
+- [ ] **Background reclustering** — periodic full recluster + SNOWPACK rerun from scratch, run as a background process so it doesn't block the operational forecast pipeline. When complete, swap the cluster map and all associated files atomically. Forecasts continue running on the old cluster map until the swap.
+
+  **Physical justification:** SNOWPACK is deterministic given the same SMET input — a from-scratch run from season start to the current date produces the same output as incremental updates to the same date, at higher compute cost. So a background full recluster sacrifices no accuracy vs. the existing incremental approach, and can fix problems that splits and merges can't: (1) initial clustering that was poorly positioned relative to the season's actual HS gradients, (2) accumulated cluster count bloat from many splits.
+
+  **Trigger conditions (any one suffices):**
+  - Total cluster count has grown by >50% since season start
+  - Mean cluster size has fallen below `min_cluster_size × 2` (clusters too small for reliable SNOWPACK)
+  - Cluster quality monitoring shows >20% of clusters exceeding the adaptive split threshold for two consecutive surveys (systematic degradation, not isolated splits)
+  - Complete melt-out event (HS ≈ 0 across the domain) — stratigraphy is reset, nothing to lose
+  - Explicit operator trigger (e.g., `run_full_pipeline.sh --recluster`)
+
+  **What the background process does:**
+  1. Re-run initial clustering on the full HS matrix (all surveys to date) with the same PCA + MiniBatchKMeans pipeline
+  2. Generate new SMETs for all new clusters (pixel-membership-weighted HS histories)
+  3. Run SNOWPACK from season start to current date for all new clusters (this is the expensive step — same wall time as initial pipeline, ~2 hrs)
+  4. Validate output: check that new cluster map stability metrics (median Sk38, Pi1) are consistent with old map within some tolerance. If validation fails, abort swap and alert.
+  5. Atomic swap: replace `cluster_map.npy`, all `.sno`/`.smet`/`.pro` files, Zarr store. Archive old files with a timestamp suffix.
+  6. Update `cluster_splits.json` to mark the recluster event (all lineage history from before the recluster is archived but no longer active).
+
+  **Timing:** prefer low-hazard periods or overnight. If the server is idle (no active SNOWPACK runs, no forecast in progress), the background recluster can use all available cores. Implement a lock file so the operational pipeline and background recluster don't run SNOWPACK simultaneously on the same slope directory.
