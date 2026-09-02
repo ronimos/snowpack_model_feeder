@@ -644,9 +644,6 @@ def main():
 
     cfg = ProjectConfig(project_dir=Path(args.project_dir))
 
-    geojson_path = Path(args.release_geojson) if args.release_geojson else \
-        cfg.project_dir / 'data' / 'boundaries' / 'avalanche_release_area.geojson'
-
     with rasterio.open(str(cfg.resampled_dir / "dem_1m.tif")) as src:
         dem       = src.read(1).astype(np.float32)
         dem[dem == src.nodata] = np.nan
@@ -656,18 +653,29 @@ def main():
     cluster_map = np.load(str(cfg.analysis_dir / "cluster_map.npy"))
 
     print("Building spatial masks...")
-    if geojson_path.exists():
-        release_mask = geojson_to_mask(geojson_path, dem.shape, transform)
+    release_mask = np.zeros(dem.shape, dtype=bool)
+    if args.release_geojson:
+        # Explicit override: single GeoJSON from CLI
+        gj_paths = [Path(args.release_geojson)]
     else:
-        print(f"  No release area geojson found at {geojson_path} — skipping validation grouping")
-        release_mask = np.zeros(dem.shape, dtype=bool)
+        # Auto-discover all event GeoJSONs up to snapshot_date
+        gj_paths = cfg.release_geojsons_for_date(args.snapshot_date)
+
+    if gj_paths:
+        for gj_path in gj_paths:
+            release_mask |= geojson_to_mask(gj_path, dem.shape, transform)
+        print(f"  Release mask: {len(gj_paths)} event GeoJSON(s), "
+              f"{release_mask.sum()} cells")
+    else:
+        print("  No release area GeoJSONs found for this date — empty release group")
+
     start_zone_mask = kml_to_mask(cfg.start_zone_kml, dem.shape, transform)
 
     print("Assigning clusters...")
     groups = assign_cluster_groups(
         cluster_map, release_mask, start_zone_mask, dem, domain_mask)
 
-    group_ids_path = cfg.analysis_dir / "release_zone_groups.json"
+    group_ids_path = cfg.analysis_dir / f"release_zone_groups_{args.snapshot_date}.json"
     serializable_groups = {
         k: [int(x) for x in sorted(v)]
         for k, v in groups.items()

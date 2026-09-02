@@ -118,12 +118,17 @@ def assign_cluster_groups(cluster_map, release_mask, start_zone_mask,
     dy, dx   = np.gradient(fill_dem, 1.0)
     slope    = np.degrees(np.arctan(np.sqrt(dx**2 + dy**2)))
 
-    # Release zone terrain statistics for matching
-    rel_elev_mean  = float(np.nanmean(dem[release_mask & domain_mask]))
-    rel_elev_std   = float(np.nanstd(dem[release_mask & domain_mask]))
-    rel_slope_mean = float(np.nanmean(slope[release_mask & domain_mask]))
-
     groups = {'release': set(), 'adjacent': set(), 'reference': set()}
+
+    # When no observed release is available, only adjacent can be assigned;
+    # reference terrain-matching requires a known release zone for statistics.
+    no_release = not release_mask.any()
+    if no_release:
+        rel_elev_mean = rel_elev_std = rel_slope_mean = None
+    else:
+        rel_elev_mean  = float(np.nanmean(dem[release_mask & domain_mask]))
+        rel_elev_std   = float(np.nanstd(dem[release_mask & domain_mask]))
+        rel_slope_mean = float(np.nanmean(slope[release_mask & domain_mask]))
 
     for cid in np.unique(cluster_map[domain_mask]):
         if cid <= 0:
@@ -133,14 +138,14 @@ def assign_cluster_groups(cluster_map, release_mask, start_zone_mask,
         if n == 0:
             continue
 
-        frac_rel   = (cells & release_mask).sum() / n
+        frac_rel   = 0.0 if no_release else (cells & release_mask).sum() / n
         frac_start = (cells & start_zone_mask).sum() / n
 
         if frac_rel >= 0.3:
             groups['release'].add(cid)
         elif frac_start >= 0.3:
             groups['adjacent'].add(cid)
-        else:
+        elif not no_release:
             # Terrain-match: within 1 std of release zone elevation
             c_elev  = float(np.nanmean(dem[cells]))
             c_slope = float(np.nanmean(slope[cells]))

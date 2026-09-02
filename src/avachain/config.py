@@ -93,6 +93,37 @@ class ProjectConfig:
         self.release_geojson = self.project_dir / self.release_geojson
 
     @property
+    def boundaries_dir(self) -> Path:
+        return self.project_dir / "data" / "boundaries"
+
+    def release_geojsons_for_date(self, snapshot_date: str) -> list:
+        """
+        Return all avalanche_release_area_{YYYYMMDD}.geojson paths whose
+        embedded date is ≤ snapshot_date, sorted chronologically.
+
+        snapshot_date : YYYY-MM-DD string
+        """
+        from datetime import date as _date
+        try:
+            snap = _date.fromisoformat(snapshot_date)
+        except ValueError:
+            return []
+        paths = []
+        for p in sorted(self.boundaries_dir.glob(
+                "avalanche_release_area_????????.geojson")):
+            date_str = p.stem.replace("avalanche_release_area_", "")
+            if len(date_str) == 8:
+                try:
+                    ev_date = _date(int(date_str[:4]),
+                                    int(date_str[4:6]),
+                                    int(date_str[6:8]))
+                    if ev_date <= snap:
+                        paths.append(p)
+                except ValueError:
+                    continue
+        return paths
+
+    @property
     def analysis_dir(self) -> Path:
         return self.output_dir / "analysis"
 

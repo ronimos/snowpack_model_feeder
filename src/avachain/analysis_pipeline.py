@@ -81,28 +81,46 @@ def _load_dem(cfg):
     return dem, transform, crs_wkt, profile
 
 
-def _load_groups(cfg, dem, transform):
-    """Load or build release/adjacent/reference cluster group assignments."""
-    groups_path = cfg.analysis_dir / "release_zone_groups.json"
+def _load_groups(cfg, dem, transform, snapshot_date=None):
+    """Load or build release/adjacent/reference cluster group assignments.
+
+    Groups are date-specific: all observed release GeoJSONs up to
+    snapshot_date are unioned to form the release mask.  When no events
+    exist for the date (operational no-avalanche day), the release group
+    is empty and reference terrain-matching is skipped.
+    """
+    cache_name = (f"release_zone_groups_{snapshot_date}.json"
+                  if snapshot_date else "release_zone_groups.json")
+    groups_path = cfg.analysis_dir / cache_name
     if groups_path.exists():
         with open(str(groups_path)) as f:
             raw = json.load(f)
         return {k: set(v) for k, v in raw.items()}
 
-    # Build from boundary files
     print("Building cluster group assignments from boundaries...")
     from snowpack_analysis import geojson_to_mask
     cluster_map = np.load(str(cfg.analysis_dir / "cluster_map.npy"))
 
-    gj_path = cfg.release_geojson
-    release_mask    = geojson_to_mask(gj_path, dem.shape, transform)
+    release_mask = np.zeros(dem.shape, dtype=bool)
+    if snapshot_date:
+        gj_paths = cfg.release_geojsons_for_date(snapshot_date)
+        for gj_path in gj_paths:
+            release_mask |= geojson_to_mask(gj_path, dem.shape, transform)
+        if gj_paths:
+            print(f"  Release mask from {len(gj_paths)} event GeoJSON(s), "
+                  f"{release_mask.sum()} cells")
+        else:
+            print("  No release area GeoJSONs for this date — empty release group")
+    else:
+        if cfg.release_geojson.exists():
+            release_mask = geojson_to_mask(cfg.release_geojson, dem.shape, transform)
+
     start_zone_mask = kml_to_mask(cfg.start_zone_kml, dem.shape, transform)
     domain_mask     = ~np.isnan(dem)
 
     groups = assign_cluster_groups(
         cluster_map, release_mask, start_zone_mask, dem, domain_mask)
 
-    # Persist for next run
     groups_path.write_text(
         json.dumps({k: list(v) for k, v in groups.items()}, indent=2))
     print(f"  Groups saved: { {k: len(v) for k, v in groups.items()} }")
@@ -143,19 +161,27 @@ def _depth_weights(depth_pcts: list) -> list:
     return [r / total for r in raw]
 
 
-def _load_observed_release_polygon(cfg):
+def _load_observed_release_polygon(cfg, snapshot_date=None):
     """
-    Load the observed Jan 18 release area GeoJSON and reproject to UTM.
-    Returns a single shapely Polygon for use as the release geometry.
+    Load the most recent observed release area GeoJSON up to snapshot_date
+    and reproject to UTM.  Returns a single shapely Polygon.
     """
     import json
     from shapely.geometry import shape
     from shapely.ops import unary_union
     from pyproj import Transformer
 
-    gj_path = cfg.release_geojson
-    if not gj_path.exists():
-        raise FileNotFoundError(f"Observed release GeoJSON not found: {gj_path}")
+    if snapshot_date:
+        gj_paths = cfg.release_geojsons_for_date(snapshot_date)
+        gj_path = gj_paths[-1] if gj_paths else None
+    else:
+        gj_path = cfg.release_geojson if cfg.release_geojson.exists() else None
+
+    if gj_path is None or not gj_path.exists():
+        raise FileNotFoundError(
+            f"No observed release GeoJSON found"
+            + (f" for date ≤ {snapshot_date}" if snapshot_date else "")
+        )
 
     with open(str(gj_path)) as f:
         gj = json.load(f)
@@ -249,7 +275,7 @@ def step_scenarios(cfg, args):
     dem, transform, crs_wkt, raster_profile = _load_dem(cfg)
     cluster_map = np.load(str(cfg.analysis_dir / "cluster_map.npy"))
     ds          = load_dataset(args.pro_dir, zarr_path=args.zarr_path)
-    groups      = _load_groups(cfg, dem, transform)
+    groups      = _load_groups(cfg, dem, transform, args.snapshot_date)
 
     start_zone_mask = kml_to_mask(cfg.start_zone_kml, dem.shape, transform)
 
@@ -477,7 +503,7 @@ def step_scenarios(cfg, args):
     # --- Load observed release polygon if validation mode ---
     observed_polygon = None
     if args.use_observed_release:
-        observed_polygon = _load_observed_release_polygon(cfg)
+        observed_polygon = _load_observed_release_polygon(cfg, args.snapshot_date)
         print("Mode: OBSERVED RELEASE (validation — flow model only)")
     else:
         print("Mode: MELOCHE-DERIVED RELEASE (full chain)")
@@ -772,7 +798,7 @@ def step_scenarios(cfg, args):
     plot_path = out_dir / f"release_comparison_{mode_str}_{args.snapshot_date}_physical_model.png"
     print(f"  Output path: {plot_path}")
     try:
-        obs_poly   = _load_observed_release_polygon(cfg)
+        obs_poly   = _load_observed_release_polygon(cfg, args.snapshot_date)
         poly_pairs = [(p, sf) for p, sf, _ in median_polygons]
         t_labels   = [lbl for _, _, lbl in median_polygons]
 

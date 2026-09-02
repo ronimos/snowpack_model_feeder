@@ -39,6 +39,53 @@ import numpy as np
 import pandas as pd
 import rasterio
 
+
+def _mask_to_geojson_wgs84(mask: np.ndarray, transform, crs, out_path: Path) -> None:
+    """Vectorise a boolean raster mask and write as a WGS84 GeoJSON file."""
+    import json as _json
+    from rasterio.features import shapes as _shapes
+    from shapely.geometry import shape, mapping
+    from shapely.ops import unary_union
+    from pyproj import Transformer as _T
+
+    mask_u8 = mask.astype(np.uint8)
+    polygons = [shape(geom) for geom, val in
+                _shapes(mask_u8, transform=transform) if val == 1]
+    if not polygons:
+        return
+    merged = unary_union(polygons)
+
+    try:
+        src_epsg = crs.to_epsg() if hasattr(crs, 'to_epsg') else None
+        if src_epsg and src_epsg != 4326:
+            tr = _T.from_crs(f'EPSG:{src_epsg}', 'EPSG:4326', always_xy=True)
+            from shapely.geometry import Polygon, MultiPolygon
+
+            def _ring(r):
+                xs, ys = zip(*r.coords)
+                return list(zip(*tr.transform(list(xs), list(ys))))
+
+            def _reproj(poly):
+                if poly.geom_type == 'Polygon':
+                    return Polygon(_ring(poly.exterior),
+                                   [_ring(i) for i in poly.interiors])
+                return MultiPolygon([_reproj(p) for p in poly.geoms])
+
+            merged = _reproj(merged)
+    except Exception as exc:
+        print(f"  WARNING: GeoJSON CRS reprojection failed ({exc})")
+
+    gj = {
+        'type': 'FeatureCollection',
+        'features': [{
+            'type': 'Feature',
+            'geometry': mapping(merged),
+            'properties': {'source': 'auto_detect'},
+        }],
+    }
+    out_path.write_text(_json.dumps(gj))
+
+
 from config import ProjectConfig
 from spatial_model import (
     create_reference_dem, load_and_resample,
@@ -488,7 +535,7 @@ def step_avalanche(cfg: ProjectConfig):
         separate_avalanche_from_wind
     )
 
-    dem, transform, _ = load_dem(cfg)
+    dem, transform, crs = load_dem(cfg)
     transport_meta = load_transport_meta(cfg)
     valid_dem = ~np.isnan(dem)
 
@@ -568,6 +615,15 @@ def step_avalanche(cfg: ProjectConfig):
                     'event_timestamp': event_ts,
                 }
                 print(f"    → Transport corrected, {combined_mask.sum()} cells")
+
+                # Export release mask as GeoJSON for dynamic group assignment
+                event_date_str = (pd.Timestamp(event_ts).strftime('%Y%m%d')
+                                  if event_ts else d_b.replace('-', ''))
+                gj_out = (cfg.boundaries_dir /
+                          f"avalanche_release_area_{event_date_str}.geojson")
+                if not gj_out.exists():
+                    _mask_to_geojson_wgs84(combined_mask, transform, crs, gj_out)
+                    print(f"    → Release mask exported: {gj_out.name}")
 
     avy_output = {}
     for pair_id in period_results:
@@ -931,42 +987,97 @@ def step_smet(cfg: ProjectConfig):
 # Step: reinit — Post-avalanche SNOWPACK reinitialization
 # =====================================================================
 
-def step_reinit(cfg: ProjectConfig):
-    """
-    Scour release cluster .sno files after a detected avalanche event.
-
-    Uses min-kernel detection on the UAS dHS field to identify the release
-    area, then removes slab layers from .sno restart files.
-
-    Requires:
-      - Resampled surveys (hs_YYYY-MM-DD.npy) bracketing the event
-      - SNOWPACK .sno restart files (from a completed simulation)
-      - Slab thickness features (from analysis_pipeline.py analyze)
-
-    CLI args (via argparse in main):
-      --event-date, --date-before, --date-after, --snapshot-date
-      --kernel-size, --threshold-sigma-reinit
-      --release-geojson (optional, bypasses auto-detection)
-      --reinit-dry-run
-    """
+def _reinit_single(cfg, args, event_date, event_time, date_before,
+                    date_after, snapshot_date, release_geojson):
+    """Run reinit for one event. Shared by single-event and multi-event paths."""
     from reinitialize_snowpack import run_reinit
-
-    # These are set in the argparse section below
-    args = cfg._reinit_args
-
     run_reinit(
         cfg=cfg,
-        date_before=args.date_before,
-        date_after=args.date_after,
-        event_date=args.event_date,
-        event_time=getattr(args, 'event_time', '12:00:00'),
-        snapshot_date=args.snapshot_date,
-        release_geojson=getattr(args, 'release_geojson', None),
+        date_before=date_before,
+        date_after=date_after,
+        event_date=event_date,
+        event_time=event_time,
+        snapshot_date=snapshot_date,
+        release_geojson=release_geojson,
         kernel_size=getattr(args, 'kernel_size_reinit', 7),
         threshold_sigma=getattr(args, 'threshold_sigma_reinit', 1.2),
         dry_run=getattr(args, 'reinit_dry_run', False),
         no_backup=getattr(args, 'reinit_no_backup', False),
     )
+
+
+def step_reinit(cfg: ProjectConfig):
+    """
+    Scour release cluster .sno files after detected avalanche event(s).
+
+    Single-event mode (default):
+      Uses --event-date, --date-before, --date-after from CLI.
+
+    Multi-event mode (--all-events):
+      Reads outputs/analysis/avalanche_events.json and reruns all
+      corrected events in chronological order.  For each event,
+      uses the corresponding avalanche_release_area_{YYYYMMDD}.geojson
+      if it exists (written by step_avalanche), else falls back to
+      auto-detection.
+    """
+    args = cfg._reinit_args
+
+    if getattr(args, 'all_events', False):
+        avy_path = cfg.analysis_dir / "avalanche_events.json"
+        if not avy_path.exists():
+            print("ERROR: avalanche_events.json not found. Run 'avalanche' step first.")
+            return
+
+        with open(avy_path) as f:
+            avy_events = json.load(f)
+
+        corrected = sorted(
+            [(pid, ev) for pid, ev in avy_events.items() if ev.get('corrected')],
+            key=lambda x: x[1].get('event_timestamp', ''),
+        )
+        if not corrected:
+            print("No corrected events found in avalanche_events.json.")
+            return
+
+        print(f"Multi-event reinit: {len(corrected)} event(s)")
+        for pair_id, ev in corrected:
+            d_a, d_b = pair_id.split('__')
+            event_ts   = ev.get('event_timestamp', '')
+            if event_ts:
+                ts = pd.Timestamp(event_ts)
+                event_date = ts.strftime('%Y-%m-%d')
+                event_time = ts.strftime('%H:%M:%S')
+            else:
+                event_date = d_b
+                event_time = '12:00:00'
+
+            event_date_str = event_date.replace('-', '')
+            gj_path = (cfg.boundaries_dir /
+                       f"avalanche_release_area_{event_date_str}.geojson")
+            release_geojson = str(gj_path) if gj_path.exists() else None
+
+            print(f"\n  Event {pair_id}  ({event_date} {event_time})"
+                  + (f"  GeoJSON: {gj_path.name}" if release_geojson else
+                     "  (auto-detect)"))
+            _reinit_single(
+                cfg, args,
+                event_date=event_date,
+                event_time=event_time,
+                date_before=d_a,
+                date_after=d_b,
+                snapshot_date=d_a,
+                release_geojson=release_geojson,
+            )
+    else:
+        _reinit_single(
+            cfg, args,
+            event_date=args.event_date,
+            event_time=getattr(args, 'event_time', '12:00:00'),
+            date_before=args.date_before,
+            date_after=args.date_after,
+            snapshot_date=args.snapshot_date,
+            release_geojson=getattr(args, 'release_geojson', None),
+        )
 
 
 # =====================================================================
@@ -1032,6 +1143,9 @@ def main():
                         help="Show what reinit would do without writing")
     parser.add_argument('--reinit-no-backup', action='store_true',
                         help="Skip .sno.bak backup files (reinit step)")
+    parser.add_argument('--all-events', action='store_true',
+                        help="Reinit all corrected events from avalanche_events.json "
+                             "(ignores --event-date/--date-before/--date-after)")
 
     args = parser.parse_args()
 
