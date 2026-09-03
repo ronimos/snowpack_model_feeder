@@ -21,7 +21,7 @@
 set -euo pipefail
 
 PROJECT_DIR=/home/ron/snowpack_model_feeder
-ANALYSIS="python $PROJECT_DIR/src/snowpack-model-feeder/analysis_pipeline.py"
+ANALYSIS="$PROJECT_DIR/.venv/bin/python $PROJECT_DIR/src/avachain/analysis_pipeline.py"
 VENV=$PROJECT_DIR/.venv/bin/activate
 LOG_DIR=$PROJECT_DIR/outputs/logs
 
