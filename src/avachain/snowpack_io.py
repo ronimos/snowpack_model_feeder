@@ -127,7 +127,8 @@ def build_zarr_cache(pro_dir: Path,
                 os.symlink(str(f.resolve()), os.path.join(tmp, f.name))
             t0 = time.time()
             try:
-                ds = xsnow.read(tmp, lazy=False, n_cpus_use=n_cpus)
+                ds = xsnow.read(tmp, lazy=False, n_cpus_use=n_cpus,
+                                max_layers=max_layers)
             except Exception as exc:
                 print(f"    ERROR reading batch: {exc}")
                 continue
