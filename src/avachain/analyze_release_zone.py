@@ -640,6 +640,10 @@ def main():
     parser.add_argument('--plots', action='store_true',
                         help='Generate research plots (comparison, deviations, Meloche); '
                              'off by default for operational runs')
+    parser.add_argument('--operational', action='store_true',
+                        help='Skip release/adjacent/reference group comparison '
+                             '(~46k Zarr loads). Only produces '
+                             'all_start_zone_features and meloche_features_all CSVs.')
     args = parser.parse_args()
 
     cfg = ProjectConfig(project_dir=Path(args.project_dir))
@@ -703,110 +707,114 @@ def main():
 
     print("Extracting per-cluster features at snapshot...")
     snap_data = {}
-    for grp, ids in groups.items():
-        print(f"  {GROUP_LABELS[grp]} ({len(ids)} clusters)...")
-        loc_mask = np.array([
-            int(str(loc).split('_')[-1]) in ids
-            for loc in location_names])
-        if not loc_mask.any():
-            snap_data[grp] = pd.DataFrame()
-            continue
 
-        ds_group = ds.isel(location=loc_mask)
-        loc_ids  = [int(str(loc).split('_')[-1])
-                    for loc in location_names[loc_mask]]
-
-        # Only look at conditions from Dec 1 onward (prior year)
-        season_year = snap_ts.year - 1 if snap_ts.month < 9 else snap_ts.year
-        dec1 = pd.Timestamp(f'{season_year}-12-01')
-        if snap_ts < dec1:
-            print(f"    Snapshot {snap_ts.date()} is before Dec 1 {season_year} — skipping")
-            snap_data[grp] = pd.DataFrame()
-            continue
-
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            print(f"    Loading {loc_mask.sum()} locations from Zarr...")
-            ds_t = ds_group.sel(time=snap_ts, method='nearest').compute()
-
-        rows = []
-        n_locs = ds_t.sizes.get('location', 1)
-        for i in range(n_locs):
-            try:
-                ds_loc = ds_t.isel(location=i) \
-                    if 'location' in ds_t.dims else ds_t
-                feat = profile_features(ds_loc, args.min_depth)
-                if feat:
-                    feat['cluster_id'] = loc_ids[i]
-                    rows.append(feat)
-            except Exception:
+    if args.operational:
+        print("  --operational: skipping release/adjacent/reference group extraction")
+    else:
+        for grp, ids in groups.items():
+            print(f"  {GROUP_LABELS[grp]} ({len(ids)} clusters)...")
+            loc_mask = np.array([
+                int(str(loc).split('_')[-1]) in ids
+                for loc in location_names])
+            if not loc_mask.any():
+                snap_data[grp] = pd.DataFrame()
                 continue
 
-        df = pd.DataFrame(rows).set_index('cluster_id') if rows \
-             else pd.DataFrame()
-        snap_data[grp] = df
-        if not df.empty:
-            print(f"    {len(df)} clusters, {df.notna().all(axis=1).sum()} complete")
+            ds_group = ds.isel(location=loc_mask)
+            loc_ids  = [int(str(loc).split('_')[-1])
+                        for loc in location_names[loc_mask]]
 
-    if args.plots:
-        cfg.plots_dir.mkdir(parents=True, exist_ok=True)
-        out_plot = cfg.plots_dir / f"release_zone_comparison_{snap_ts.date()}.png"
-        plot_snapshot_comparison(snap_data, out_plot, args.min_depth, snap_ts)
-        out_dev = cfg.plots_dir / f"release_zone_deviations_{snap_ts.date()}.png"
-        plot_snapshot_deviations(snap_data, out_dev, snap_ts, args.min_depth)
-
-    # --- Classifier ---
-    if args.classifier:
-        print("Running RF classifier...")
-        run_snapshot_classifier(snap_data, cfg.plots_dir, snap_ts)
-
-        # Cross-date test: train on snapshot, score all survey dates
-        if args.cross_date_test:
-            print("Cross-date test: training on snapshot, scoring other dates...")
-            cross_date_test(ds, groups, location_names, args.min_depth,
-                            snap_ts, cfg.plots_dir)
-
-    # --- Meloche et al. (2025) spatial features ---
-    print("Computing Meloche et al. (2025) spatial features (θ, Π₁, Π₂, A_ca)...")
-    meloche_df = compute_meloche_features(
-        snap_data, cluster_map, dem, transform, snap_ts)
-
-    if not meloche_df.empty:
-        out_meloche = cfg.analysis_dir / f"meloche_features_{snap_ts.date()}.csv"
-        meloche_df.to_csv(str(out_meloche))
-        print(f"Meloche features saved: {out_meloche}")
-
-        # Print summary by group
-        group_map = {}
-        for grp, df in snap_data.items():
-            for cid in df.index:
-                group_map[cid] = grp
-        meloche_df['group'] = meloche_df.index.map(lambda x: group_map.get(x, 'unknown'))
-        for grp in ('release', 'adjacent', 'reference'):
-            sub = meloche_df[meloche_df['group'] == grp]
-            if sub.empty:
+            # Only look at conditions from Dec 1 onward (prior year)
+            season_year = snap_ts.year - 1 if snap_ts.month < 9 else snap_ts.year
+            dec1 = pd.Timestamp(f'{season_year}-12-01')
+            if snap_ts < dec1:
+                print(f"    Snapshot {snap_ts.date()} is before Dec 1 {season_year} — skipping")
+                snap_data[grp] = pd.DataFrame()
                 continue
-            for col in ('theta', 'Pi1_elastic', 'Pi2_brittle', 'A_ca_brittle'):
-                if col in sub.columns:
-                    med = sub[col].median()
-                    print(f"  {grp:10s} {col:15s}: median={med:.4f}")
+
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                print(f"    Loading {loc_mask.sum()} locations from Zarr...")
+                ds_t = ds_group.sel(time=snap_ts, method='nearest').compute()
+
+            rows = []
+            n_locs = ds_t.sizes.get('location', 1)
+            for i in range(n_locs):
+                try:
+                    ds_loc = ds_t.isel(location=i) \
+                        if 'location' in ds_t.dims else ds_t
+                    feat = profile_features(ds_loc, args.min_depth)
+                    if feat:
+                        feat['cluster_id'] = loc_ids[i]
+                        rows.append(feat)
+                except Exception:
+                    continue
+
+            df = pd.DataFrame(rows).set_index('cluster_id') if rows \
+                 else pd.DataFrame()
+            snap_data[grp] = df
+            if not df.empty:
+                print(f"    {len(df)} clusters, {df.notna().all(axis=1).sum()} complete")
 
         if args.plots:
             cfg.plots_dir.mkdir(parents=True, exist_ok=True)
-            plot_meloche_comparison(meloche_df, cfg.plots_dir, snap_ts)
+            out_plot = cfg.plots_dir / f"release_zone_comparison_{snap_ts.date()}.png"
+            plot_snapshot_comparison(snap_data, out_plot, args.min_depth, snap_ts)
+            out_dev = cfg.plots_dir / f"release_zone_deviations_{snap_ts.date()}.png"
+            plot_snapshot_deviations(snap_data, out_dev, snap_ts, args.min_depth)
 
-    # --- Save feature table (release + adjacent + reference groups) ---
-    out_csv = cfg.analysis_dir / f"release_zone_features_{snap_ts.date()}.csv"
-    rows = []
-    for grp, df in snap_data.items():
-        if df.empty:
-            continue
-        df2 = df.copy()
-        df2['group'] = grp
-        rows.append(df2)
-    if rows:
-        pd.concat(rows).to_csv(str(out_csv))
-        print(f"Feature table saved: {out_csv}")
+        # --- Classifier ---
+        if args.classifier:
+            print("Running RF classifier...")
+            run_snapshot_classifier(snap_data, cfg.plots_dir, snap_ts)
+
+            # Cross-date test: train on snapshot, score all survey dates
+            if args.cross_date_test:
+                print("Cross-date test: training on snapshot, scoring other dates...")
+                cross_date_test(ds, groups, location_names, args.min_depth,
+                                snap_ts, cfg.plots_dir)
+
+        # --- Meloche et al. (2025) spatial features (group-level) ---
+        print("Computing Meloche et al. (2025) spatial features (θ, Π₁, Π₂, A_ca)...")
+        meloche_df = compute_meloche_features(
+            snap_data, cluster_map, dem, transform, snap_ts)
+
+        if not meloche_df.empty:
+            out_meloche = cfg.analysis_dir / f"meloche_features_{snap_ts.date()}.csv"
+            meloche_df.to_csv(str(out_meloche))
+            print(f"Meloche features saved: {out_meloche}")
+
+            # Print summary by group
+            group_map = {}
+            for grp, df in snap_data.items():
+                for cid in df.index:
+                    group_map[cid] = grp
+            meloche_df['group'] = meloche_df.index.map(lambda x: group_map.get(x, 'unknown'))
+            for grp in ('release', 'adjacent', 'reference'):
+                sub = meloche_df[meloche_df['group'] == grp]
+                if sub.empty:
+                    continue
+                for col in ('theta', 'Pi1_elastic', 'Pi2_brittle', 'A_ca_brittle'):
+                    if col in sub.columns:
+                        med = sub[col].median()
+                        print(f"  {grp:10s} {col:15s}: median={med:.4f}")
+
+            if args.plots:
+                cfg.plots_dir.mkdir(parents=True, exist_ok=True)
+                plot_meloche_comparison(meloche_df, cfg.plots_dir, snap_ts)
+
+        # --- Save feature table (release + adjacent + reference groups) ---
+        out_csv = cfg.analysis_dir / f"release_zone_features_{snap_ts.date()}.csv"
+        rows = []
+        for grp, df in snap_data.items():
+            if df.empty:
+                continue
+            df2 = df.copy()
+            df2['group'] = grp
+            rows.append(df2)
+        if rows:
+            pd.concat(rows).to_csv(str(out_csv))
+            print(f"Feature table saved: {out_csv}")
 
     # --- All start zone clusters (always extracted; required by step_scenarios) ---
     print("\nExtracting features for ALL start zone clusters...")

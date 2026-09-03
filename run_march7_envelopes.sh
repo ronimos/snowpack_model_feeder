@@ -6,9 +6,9 @@
 #
 # Size factor spreads widen with forecast horizon — higher uncertainty further
 # from the observed state:
-#   T_2 (Mar 5): 0.55 – 1.00 – 1.45   (widest)
+#   T_2 (Mar 5): 0.55 – 1.00 – 1.70   (widest)
 #   T_1 (Mar 6): 0.70 – 1.00 – 1.30
-#   T_0 (Mar 7): 0.85 – 1.00 – 1.15   (narrowest)
+#   T_0 (Mar 7): 0.70 0.85 – 1.00   (narrowest)
 #
 # max-slab-thickness=3.0 targets natural trigger scenarios.
 #
@@ -61,10 +61,13 @@ echo ""
 echo ">>> Step 2: Analyze snapshot dates (parallel)"
 step2_start=$SECONDS
 
-$ANALYSIS analyze --snapshot-date 2026-03-05 &
-$ANALYSIS analyze --snapshot-date 2026-03-06 &
+#$ANALYSIS analyze --snapshot-date 2026-03-05 &
+#$ANALYSIS analyze --snapshot-date 2026-03-06 &
 $ANALYSIS analyze --snapshot-date 2026-03-07 &
-wait
+p_analyze=$!
+# Wait only for the Python jobs — bare `wait` would also wait for the
+# tee process substitution (>(tee ...)) and deadlock.
+wait $p_analyze
 
 step2_elapsed=$((SECONDS - step2_start))
 echo "    Done: $(($step2_elapsed / 60))m $(($step2_elapsed % 60))s"
@@ -74,28 +77,36 @@ echo ""
 echo ">>> Step 3: Generate scenarios (parallel)"
 step3_start=$SECONDS
 
+echo ">>> Generate scenarios for T_2 (0.55 1.00 1.45 1.70) 2026-03-07"
+
 $ANALYSIS scenarios \
-    --snapshot-date 2026-03-05 --forecast-horizon T_2 \
-    --size-factors 0.55 1.00 1.45 \
+    --snapshot-date 2026-03-07 --forecast-horizon T_2 \
+    --size-factors 0.55 1.00 1.45 1.70 \
     --n-triggers $N_TRIGGERS \
     --depth-pcts $DEPTH_PCTS \
     --max-slab-thickness 3.0 &
+p_t2=$!
+
+echo ">>> Generate scenarios for T_1 (0.70 1.00 1.30) 2026-03-07"
 
 $ANALYSIS scenarios \
-    --snapshot-date 2026-03-06 --forecast-horizon T_1 \
+    --snapshot-date 2026-03-07 --forecast-horizon T_1 \
     --size-factors 0.70 1.00 1.30 \
     --n-triggers $N_TRIGGERS \
     --depth-pcts $DEPTH_PCTS \
     --max-slab-thickness 3.0 &
+p_t1=$!
 
+echo ">>> Generate scenarios for T_0 (0.70 0.85 1.00) 2026-03-07"
 $ANALYSIS scenarios \
     --snapshot-date 2026-03-07 --forecast-horizon T_0 \
-    --size-factors 0.85 1.00 1.15 \
+    --size-factors 0.70 0.85 1.00 \
     --n-triggers $N_TRIGGERS \
     --depth-pcts $DEPTH_PCTS \
     --max-slab-thickness 3.0 &
+p_t0=$!
 
-wait
+wait $p_t2 $p_t1 $p_t0
 
 step3_elapsed=$((SECONDS - step3_start))
 echo "    Done: $(($step3_elapsed / 60))m $(($step3_elapsed % 60))s"

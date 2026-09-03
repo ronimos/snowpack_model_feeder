@@ -265,7 +265,11 @@ def step_analyze(cfg, args):
         cmd.append('--classifier')
     if args.plots:
         cmd.append('--plots')
-    print(f"Running: {' '.join(cmd)}")
+    else:
+        # Operational mode: skip the ~46k-location release/adjacent/reference
+        # group comparison; only produce the two CSVs step_scenarios needs.
+        cmd.append('--operational')
+    print(f"Running: {' '.join(cmd)}", flush=True)
     subprocess.run(cmd, check=True)
 
 
