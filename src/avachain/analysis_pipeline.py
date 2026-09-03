@@ -242,6 +242,19 @@ def step_analyze(cfg, args):
         outputs/plots/meloche_comparison_YYYY-MM-DD.png
     """
     import subprocess
+
+    # Skip if both output CSVs exist and are newer than the Zarr store.
+    # Pass --force to bypass this check.
+    feat_csv = cfg.analysis_dir / f"all_start_zone_features_{args.snapshot_date}.csv"
+    mel_csv  = cfg.analysis_dir / f"meloche_features_all_{args.snapshot_date}.csv"
+    zarr_path = Path(args.zarr_path)
+    if not getattr(args, 'force', False) and feat_csv.exists() and mel_csv.exists():
+        zarr_mtime = zarr_path.stat().st_mtime if zarr_path.exists() else 0
+        if feat_csv.stat().st_mtime > zarr_mtime and mel_csv.stat().st_mtime > zarr_mtime:
+            print(f"  analyze {args.snapshot_date}: CSVs up-to-date, skipping "
+                  f"(pass --force to rerun)")
+            return
+
     script = Path(__file__).resolve().parent / "analyze_release_zone.py"
     cmd    = [sys.executable, str(script),
               '--project-dir', str(cfg.project_dir),
@@ -874,6 +887,8 @@ def main():
 
     # analyze
     parser.add_argument('--classifier', action='store_true')
+    parser.add_argument('--force', action='store_true',
+                        help='Force rerun of analyze even if CSVs are newer than the Zarr.')
     parser.add_argument('--plots', action='store_true',
                         help='Generate research/diagnostic plots '
                              '(analyze: comparison, deviations, Meloche; '
