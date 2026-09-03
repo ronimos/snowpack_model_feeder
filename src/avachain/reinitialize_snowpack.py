@@ -389,6 +389,10 @@ def run_reinit(cfg,
             sno_path = sno_dir / sno_name
 
         if not sno_path.exists():
+            sno_name = f"cluster_{cid:04d}_cluster_{cid:04d}.sno"
+            sno_path = sno_dir / sno_name
+
+        if not sno_path.exists():
             n_missing += 1
             continue
 

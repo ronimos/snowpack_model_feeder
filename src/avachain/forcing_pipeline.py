@@ -56,7 +56,14 @@ def _mask_to_geojson_wgs84(mask: np.ndarray, transform, crs, out_path: Path) -> 
     merged = unary_union(polygons)
 
     try:
-        src_epsg = crs.to_epsg() if hasattr(crs, 'to_epsg') else None
+        from pyproj import CRS as _CRS
+        pycrs = _CRS.from_user_input(crs)
+        # Compound CRS (e.g. UTM + NAVD88 vertical): take horizontal component
+        if pycrs.is_compound and hasattr(pycrs, 'sub_crs_list'):
+            src_epsg = next((s.to_epsg() for s in pycrs.sub_crs_list
+                             if s.to_epsg()), None)
+        else:
+            src_epsg = pycrs.to_epsg()
         if src_epsg and src_epsg != 4326:
             tr = _T.from_crs(f'EPSG:{src_epsg}', 'EPSG:4326', always_xy=True)
             from shapely.geometry import Polygon, MultiPolygon
@@ -627,7 +634,7 @@ def step_avalanche(cfg: ProjectConfig):
         # --- Classification ---
         is_known      = pair_id in known_periods
         crown_override = has_crown and frac_loss >= cfg.frac_loss_threshold
-        is_candidate  = frac_loss < cfg.frac_loss_threshold or has_crown
+        is_candidate  = frac_loss < cfg.frac_loss_threshold or has_crown or is_known
 
         period_results[pair_id] = {
             'regions':   regions,
@@ -1207,7 +1214,7 @@ def step_reinit(cfg: ProjectConfig):
                 event_time=event_time,
                 date_before=d_a,
                 date_after=d_b,
-                snapshot_date=d_a,
+                snapshot_date=event_date,
                 release_geojson=release_geojson,
             )
     else:

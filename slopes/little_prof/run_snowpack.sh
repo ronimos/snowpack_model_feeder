@@ -27,7 +27,16 @@ TEMPLATE_SNO=$SNOW_IN_DIR/template.sno
 # --- Date range ---
 # Get first data timestamp from first cluster SMET
 first_smet=("$SMET_DIR"/cluster_*.smet)
-BDATE=$(awk '/^\[DATA\]/{found=1; next} found{print $1; exit}' "${first_smet[0]}")
+# $1: optional start date override (YYYY-MM-DDTHH:MM or YYYY-MM-DD).
+#     If omitted, start date is taken from the first line of the first SMET.
+#     Pass 2 after reinit: use the event date (e.g. 2026-01-18T18:00)
+if [[ -n "${1:-}" ]]; then
+    BDATE="${1}"
+    # Append T18:00 if only a date was given
+    [[ "$BDATE" != *T* ]] && BDATE="${BDATE}T18:00"
+else
+    BDATE=$(awk '/^\[DATA\]/{found=1; next} found{print $1; exit}' "${first_smet[0]}")
+fi
 EDATE="${2:-2026-03-31}T18:00"
 
 # --- Optional: run only specific clusters ---
