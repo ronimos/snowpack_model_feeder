@@ -113,9 +113,12 @@ def build_zarr_cache(pro_dir: Path,
         batch_files = pro_files[batch_idx * batch_size:
                                 (batch_idx + 1) * batch_size]
 
-        # Skip completed batches
-        batch_names = [f.stem for f in batch_files]
-        if written_locs and all(n in written_locs for n in batch_names):
+        # Skip completed batches.
+        # .pro files are named {station}_{experiment}.pro (e.g. cluster_0001_cluster_0001.pro)
+        # but the Zarr location coordinate stores just the station name (cluster_0001).
+        # Strip the _<experiment> suffix so the resume check matches.
+        batch_locs = [f.stem.split('_cluster_')[0] for f in batch_files]
+        if written_locs and all(n in written_locs for n in batch_locs):
             print(f"  Batch {batch_idx+1}/{n_batches}: SKIP")
             continue
 
