@@ -1234,22 +1234,21 @@ def step_reinit(cfg: ProjectConfig):
 # =====================================================================
 
 STEPS = {
-    'resample':  step_resample,
-    'transport': step_transport,
-    'features':  step_features,
-    'train':     step_train,
-    'avalanche': step_avalanche,
-    'cluster':   step_cluster,
-    'gap_fill':  step_gap_fill,
-    'smet':      step_smet,
-    'reinit':    step_reinit,
+    'resample':       step_resample,
+    'transport':      step_transport,
+    'features':       step_features,
+    'train':          step_train,
+    'avalanche':      step_avalanche,
+    'cluster':        step_cluster,
+    'gap_fill':       step_gap_fill,
+    'cluster_update': None,   # survey-driven; dispatched specially (needs args)
+    'smet':           step_smet,
+    'reinit':         step_reinit,
 }
 
-# Canonical execution order.
-# Note: 'cluster' only requires 'resample' and can run before 'gap_fill',
-# but is placed here so that the domain mask is available during QA review
-# of gap-fill results before writing SMET files.
-# 'reinit' is not in ALL_STEPS — it's event-driven, not part of routine runs.
+# Canonical execution order for 'all'.
+# 'reinit' and 'cluster_update' are NOT in ALL_STEPS — both are event/survey-
+# driven and are invoked explicitly, not as part of a routine full run.
 ALL_STEPS = ['resample', 'transport', 'features', 'train', 'avalanche',
              'cluster', 'gap_fill', 'smet']
 
@@ -1269,6 +1268,17 @@ def main():
                         help="Gap-fill using RF model for transport (default: observed transport)")
     parser.add_argument('--station-only', action='store_true',
                         help="Gap-fill using station dHS only — no spatial transport")
+
+    # cluster_update step arguments
+    parser.add_argument('--split-rel-frac', type=float, default=0.10,
+                        help='Relative HS std threshold for splitting '
+                             '(fraction of median HS, default 0.10)')
+    parser.add_argument('--split-min-abs', type=float, default=0.03,
+                        help='Minimum absolute split threshold in metres '
+                             '(noise floor, default 0.03)')
+    parser.add_argument('--split-max-abs', type=float, default=0.12,
+                        help='Maximum absolute split threshold in metres '
+                             '(cap, default 0.12)')
 
     # reinit step arguments
     parser.add_argument('--event-date', default='2026-01-18',
@@ -1315,6 +1325,9 @@ def main():
     elif args.step == 'gap_fill':
         step_gap_fill(cfg, use_model=args.use_model,
                       station_only=args.station_only)
+    elif args.step == 'cluster_update':
+        from cluster_update import step_cluster_update
+        step_cluster_update(cfg, args)
     elif args.step == 'reinit':
         # Stash args on cfg for step_reinit to access
         cfg._reinit_args = args

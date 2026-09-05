@@ -9,7 +9,7 @@
 
 - [x] **Post-avalanche SNOWPACK reinitialization** — `reinitialize_snowpack.py` implemented with min-kernel release detection and `.sno` layer scouring. Integrated as `step_reinit` in `forcing_pipeline.py`. Tested on Jan 18 event. Remaining: validate post-reinit SNOWPACK output against post-event UAS HS observation.
 
-- [ ] **Spatially distributed scour depth raster** — currently `scour_depth_m` is extracted only at the trigger cluster and applied uniformly across the path. com1DFA supports an entrainable-depth raster where each cell holds its own scour cap. To build this: run the failure-plane-to-hard-layer scan (same logic as the trigger extraction in `step_scenarios`) for every cluster in the domain, paint the result onto the 1 m grid, and write as a GeoTIFF alongside `depth.tif`. This would capture spatial variability in how much old snow the avalanche can entrain — e.g., thinner entrainable layer on wind-scoured ridges, thicker in sheltered terrain. **Blocked by:** com1DFA entrainable-depth raster input bug (may be config issue). Revisit once the raster input path is working.
+- [ ] **Spatially distributed scour depth raster** — currently `scour_depth_m` is extracted only at the trigger cluster and applied uniformly across the path. com1DFA supports an entrainable-depth raster where each cell holds its own scour cap. **Raster generation done:** `step_scenarios` now calls `_build_scour_depth_map()` which runs the failure-plane-to-hard-layer scan for every cluster in the domain (using `slab_thickness` from features for start-zone clusters; full-depth scan for path clusters without a defined failure plane) and writes `scour_depth.tif` alongside `depth.tif` in the scenario output directory. **Remaining:** wire `scour_depth.tif` into the com1DFA ini file as the entrainable-depth raster input. **Blocked by:** com1DFA entrainable-depth raster input bug (may be config issue). Revisit once the raster input path is working.
 
 - [ ] **Run observed-release validation for Val (AvaFrame)**
   ```bash
@@ -100,7 +100,7 @@
 
 ---
 
-## Probabilistic Model
+## Probabilistic Model *(low priority — need more avalanche events)*
 
 - [ ] **Resolve Λ coefficient sign ambiguity** — `delta_lambda_rel` has unexpected negative coefficient (larger Λ gradient → interior, not boundary). Hypothesized cause: internal crown-to-stauchwall Λ gradient dominates within the release area. Collect 3–5 more events to test whether coefficient stabilizes to positive sign.
 
@@ -115,6 +115,8 @@
 ---
 
 ## Data / Infrastructure
+
+- [ ] **Environment setup and data collection guide** — write a step-by-step guide covering: (1) Python environment setup (which conda/venv environments are needed and why, e.g. `.venv-punstable` for sklearn 0.22.1); (2) required input files by step (DEM, cluster map, survey HS grids, start-zone KML, weather station SMET); (3) what data to collect before running the chain (UAS survey dates and file naming conventions, station IDs, SNOWPACK installation path, AvaFrame/com1DFA version requirements); (4) directory layout expected by `run_full_pipeline.sh`; (5) a minimal worked example going from raw survey to a hazard assessment output. Target audience: a new field team member who has the data in hand but has never run the pipeline.
 
 - [ ] **Min-kernel auto-detection of release area** — automated start zone delineation from terrain and snowpack, reducing dependence on manually drawn KML.
 
@@ -143,6 +145,8 @@ Design and implement a daily-run operational pipeline that provides continuous h
 - [ ] **Daily scenario refresh** — rerun `step_scenarios` on the current snapshot date to update trigger locations and release polygons as the snowpack evolves. The daily spatial variability is station-driven only (no UAS data), so the release geometry changes are from stratigraphy evolution, not from new spatial HS information.
 
 ### Survey correction mode
+
+- [x] **Cluster splitting after every survey** — `cluster_update` (adaptive threshold bisection) now runs automatically in `run_operational.sh` after `gap_fill` and before `smet`, so every new survey triggers a quality check and splits any clusters whose internal HS std exceeds the adaptive threshold. Order: resample → gap_fill → cluster_update → smet → SNOWPACK. `smet` then regenerates SMETs for all clusters including new children.
 
 - [ ] **Back-correction on new survey** — when a new UAS survey arrives, the gap-filled hourly HS between the last two surveys was station-only extrapolation. The new survey reveals the actual spatial transport. Pipeline must: (1) replace gap-filled HS with observed transport for the inter-survey period, (2) regenerate SMETs only from the previous survey date forward, (3) rerun SNOWPACK from that date via restart files, (4) rebuild the Zarr for affected timesteps, (5) rerun analysis/scenarios.
 
@@ -185,6 +189,35 @@ Design and implement a daily-run operational pipeline that provides continuous h
   - NWP data source needs to be automated (cron job pulling from NOMADS/AWS)
 
 ### Cluster management
+
+- [ ] **Initial clustering strategy: native survey points vs. 1 m resampled grid** — decide whether to cluster on the original (irregular) UAS survey point cloud or to first resample to the 1 m DEM grid and then cluster. Both paths produce the same downstream cluster-map raster, but the spatial fidelity and compute cost differ meaningfully.
+
+  **Option A — cluster from native survey points:**
+  - **Pros:**
+    - Preserves native spatial variability nuances: sharp wind-scoured ridges, lee-deposit pockets, and cornice edges are represented at survey resolution without interpolation blur
+    - No interpolation artifacts — avoids smearing abrupt HS gradients across under-sampled gaps
+    - Fewer input points (survey spacing typically 5–10 m equivalent density) means faster PCA + MiniBatchKMeans
+    - PCA captures the true measured variance structure, not the variance of an interpolated surface
+  - **Cons:**
+    - Irregular point density biases cluster centroids toward densely sampled flight strips; windward ridges with sparse returns can be under-represented
+    - Survey-to-survey comparisons are harder if flight-line density or point spacing varies between flights — the sample the clusterer sees changes even if the snowpack did not
+    - Cluster boundary rasterization back to 1 m grid still requires nearest-neighbour assignment, so the final raster is not free of interpolation
+    - Cannot directly use pixel-count weighting for SMET gap-fill without an intermediate density correction
+
+  **Option B — resample to 1 m grid first, then cluster:**
+  - **Pros:**
+    - Regular grid aligns directly with DEM, all downstream 1 m raster products (depth.tif, entrainable depth, BFS map), and com1DFA input layers — no re-registration step
+    - Pixel-count weighting for SMET gap-fill is unambiguous (each cell = 1 m²)
+    - Consistent input geometry across surveys regardless of flight-line density or SfM point density — clustering sees the same spatial structure every time
+    - Cluster map is immediately usable as a labeled raster mask; no secondary rasterization needed
+    - Enables BFS crack propagation at 1 m resolution on the same grid without remapping
+  - **Cons:**
+    - Interpolation (IDW, kriging, or nearest-neighbour) smears sharp HS gradients — wind-slab / soft-slab transitions may be blurred, weakening the cluster-feature signal that drives PCA separation
+    - Resampling a 5–10 m-equivalent survey to 1 m oversamples by 25–100×, inflating spatial autocorrelation and artificially increasing the apparent cluster count needed to explain the variance; can lead to over-clustering of essentially uniform areas
+    - Substantially higher compute: clustering ~65 K cells (1 m grid, 250×260 m domain) vs. clustering ~3–6 K survey-representative points
+    - Interpolated values in survey gaps carry fabricated uncertainty — the cluster model treats them as real observations
+
+  **Current status:** pipeline uses the 1 m resampled grid (Option B) via `step_resample` → `step_cluster`. The primary open question is whether interpolation blur is masking gradient features (particularly at wind-scoured ridge crests) that would drive better cluster separation under Option A. Worth a side-by-side test on the Jan 17 survey: run both options with the same `n_clusters`, compare cluster boundary locations against the observed Jan 18 release perimeter.
 
 - [ ] **Mid-season cluster splitting with inheritance** — when a new survey reveals that a cluster's internal HS variability exceeds the adaptive threshold (see below), split via MiniBatchKMeans bisection. One child inherits the parent's identity: same cluster ID, `.sno` restart file, `.smet`, `.pro` history, and Zarr entries — continues seamlessly. The other child is new and needs:
   1. A copy of the parent's `.sno` at the split timestamp (same stratigraphy — they were one cluster until the survey revealed heterogeneity)

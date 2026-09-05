@@ -5,7 +5,7 @@
 #   transport, features, train, avalanche, cluster
 #
 # What it runs:
-#   resample → gap_fill → smet → SNOWPACK → analyze → scenarios
+#   resample → gap_fill → cluster_update → smet → SNOWPACK → analyze → scenarios
 #
 # SNOWPACK uses restart files from the previous run, so it only
 # simulates from where it left off — not the full season.
@@ -130,15 +130,36 @@ step1_elapsed=$((SECONDS - step1_start))
 echo "    Done: $(($step1_elapsed / 60))m $(($step1_elapsed % 60))s"
 echo ""
 
-# --- Step 2: Gap-fill + SMET ---
-echo ">>> Step 2: Gap-fill + SMET generation"
+# --- Step 2: Gap-fill ---
+echo ">>> Step 2: Gap-fill"
 step2_start=$SECONDS
 
 $PIPELINE gap_fill
-$PIPELINE smet
 
 step2_elapsed=$((SECONDS - step2_start))
 echo "    Done: $(($step2_elapsed / 60))m $(($step2_elapsed % 60))s"
+echo ""
+
+# --- Step 2b: Cluster update (split heterogeneous clusters before SMET) ---
+# Runs after gap_fill (needs hourly grids for quality assessment) and before
+# smet (so step_smet regenerates SMETs for any new child clusters).
+echo ">>> Step 2b: Cluster update (adaptive splitting)"
+step2b_start=$SECONDS
+
+$PIPELINE cluster_update
+
+step2b_elapsed=$((SECONDS - step2b_start))
+echo "    Done: $(($step2b_elapsed / 60))m $(($step2b_elapsed % 60))s"
+echo ""
+
+# --- Step 2c: SMET generation ---
+echo ">>> Step 2c: SMET generation"
+step2c_start=$SECONDS
+
+$PIPELINE smet
+
+step2c_elapsed=$((SECONDS - step2c_start))
+echo "    Done: $(($step2c_elapsed / 60))m $(($step2c_elapsed % 60))s"
 echo ""
 
 # --- Step 3: SNOWPACK ---
@@ -214,13 +235,15 @@ echo "  Operational update complete"
 echo "  Finished: $(date)"
 echo "  Total runtime: $(($total_elapsed / 3600))h $(($total_elapsed % 3600 / 60))m $(($total_elapsed % 60))s"
 echo ""
-echo "  Step 1 (resample):   $(($step1_elapsed / 60))m $(($step1_elapsed % 60))s"
-echo "  Step 2 (gap+smet):   $(($step2_elapsed / 60))m $(($step2_elapsed % 60))s"
-echo "  Step 3 (SNOWPACK):   $(($step3_elapsed / 60))m $(($step3_elapsed % 60))s"
+echo "  Step 1  (resample):        $(($step1_elapsed / 60))m $(($step1_elapsed % 60))s"
+echo "  Step 2  (gap_fill):        $(($step2_elapsed / 60))m $(($step2_elapsed % 60))s"
+echo "  Step 2b (cluster_update):  $(($step2b_elapsed / 60))m $(($step2b_elapsed % 60))s"
+echo "  Step 2c (smet):            $(($step2c_elapsed / 60))m $(($step2c_elapsed % 60))s"
+echo "  Step 3  (SNOWPACK):        $(($step3_elapsed / 60))m $(($step3_elapsed % 60))s"
 if [[ $REINIT -eq 1 ]]; then
 echo "    (two-pass: run → reinit scour → rerun)"
 fi
-echo "  Step 4 (analysis):   $(($step4_elapsed / 60))m $(($step4_elapsed % 60))s"
+echo "  Step 4  (analysis):        $(($step4_elapsed / 60))m $(($step4_elapsed % 60))s"
 echo ""
 echo "  Outputs:"
 echo "    Scenarios: $PROJECT_DIR/outputs/scenarios/"

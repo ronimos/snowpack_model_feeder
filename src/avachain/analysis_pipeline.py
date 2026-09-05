@@ -2,21 +2,22 @@
 analysis_pipeline.py — Post-SNOWPACK analysis pipeline (Pipeline B).
 
 Steps (run after SNOWPACK finishes and Zarr cache is available):
-    cluster_update  Mid-season cluster splitting (run after new survey lands)
     zarr_build      Build / resume Zarr cache from .pro files
     analyze         Snapshot comparison, Meloche features, deviation plots
     scenarios       Generate AvaFrame com1DFA release scenario ensemble
 
 Usage:
-    python analysis_pipeline.py cluster_update
     python analysis_pipeline.py zarr_build
     python analysis_pipeline.py analyze --snapshot-date 2026-01-18
     python analysis_pipeline.py scenarios --snapshot-date 2026-01-18
     python analysis_pipeline.py all --snapshot-date 2026-01-18
 
-Requires Pipeline A (pipeline.py) to have been run first to produce:
+Requires Pipeline A (forcing_pipeline.py) to have been run first to produce:
     outputs/analysis/cluster_map.npy
     outputs/analysis/release_zone_groups.json  (from step_avalanche)
+
+Note: cluster_update (mid-season splitting) lives in forcing_pipeline.py —
+it is a pre-SNOWPACK data-prep step, not a post-SNOWPACK analysis step.
 """
 
 import argparse
@@ -274,6 +275,143 @@ def step_analyze(cfg, args):
 
 
 # ---------------------------------------------------------------------------
+# Scour depth helpers (used by step_scenarios for trigger and domain map)
+# ---------------------------------------------------------------------------
+
+def _scour_depth_for_cluster(ds_t, slab_thick_m):
+    """
+    Extract entrainable scour depth from a single cluster's SNOWPACK profile.
+
+    ds_t         : xarray Dataset for one location × one timestep (squeezed)
+    slab_thick_m : slab thickness (m) defining the failure plane, or None to
+                   scan from the surface (full-depth entrainable case)
+
+    Returns (hh_depth_m, hh_depth_mid_m, hh_value).
+    All three are None on failure (missing variables, empty profile, etc.).
+    hh_depth_m     — scour depth from the bottom of the failure plane (m)
+    hh_depth_mid_m — scour depth from the midpoint of the failure plane (m)
+    hh_value       — SNOWPACK hand hardness of the stopping layer (negative int)
+    """
+    if 'hand_hardness' not in ds_t:
+        return None, None, None
+
+    hh    = ds_t['hand_hardness'].values.ravel()
+    hs_cm = float(np.nanmean(ds_t['HS'].values))
+
+    z_var = next((v for v in ('height', 'z', 'layer_height') if v in ds_t), None)
+    if z_var is None:
+        return None, None, None
+
+    z        = ds_t[z_var].values.ravel()
+    n_layers = min(len(hh), len(z))
+    hh       = hh[:n_layers]
+    z        = z[:n_layers]
+    has_hh   = ~np.isnan(hh) & (hh < 0)
+
+    # Failure plane: bottom at fp_height_cm, midpoint at fp_mid_cm
+    if slab_thick_m is not None and not np.isnan(slab_thick_m) and slab_thick_m > 0:
+        fp_height_cm = hs_cm - slab_thick_m * 100.0
+        fp_mid_cm    = hs_cm - slab_thick_m * 50.0
+        # Layer index at the failure plane (layers are bottom-to-top)
+        fp_layer_idx = 0
+        for li in range(n_layers - 1, -1, -1):
+            if z[li] <= fp_height_cm:
+                fp_layer_idx = li
+                break
+    else:
+        # No failure plane — scan from surface (full entrainable depth)
+        fp_height_cm = hs_cm
+        fp_mid_cm    = hs_cm
+        fp_layer_idx = n_layers - 1
+
+    # Scan downward from failure plane for first hard layer (harder than 1F → hh < -3)
+    hard_layer_idx = None
+    for li in range(fp_layer_idx, -1, -1):
+        if has_hh[li] and hh[li] < -3:
+            hard_layer_idx = li
+            break
+
+    if hard_layer_idx is not None:
+        hard_z         = float(z[hard_layer_idx])
+        hh_depth_m     = max((fp_height_cm - hard_z) / 100.0, 0.0)
+        hh_depth_mid_m = max((fp_mid_cm    - hard_z) / 100.0, 0.0)
+        hh_value       = float(hh[hard_layer_idx])
+    else:
+        # No hard layer — entrainable to ground
+        hh_depth_m     = max(fp_height_cm / 100.0, 0.0)
+        hh_depth_mid_m = max(fp_mid_cm    / 100.0, 0.0)
+        hh_value       = None
+
+    return hh_depth_m, hh_depth_mid_m, hh_value
+
+
+def _build_scour_depth_map(ds, cluster_map, snap_features, snap_ts):
+    """
+    Build per-cluster entrainable scour depth for every cluster in the domain.
+
+    Uses the failure-plane scan for clusters with slab_thickness in snap_features
+    (start zone); falls back to full-depth scan for path/deposition clusters.
+
+    Returns dict {cid: scour_depth_m (float)}.  Missing or failed clusters are
+    absent from the dict (caller should treat absence as NaN in the raster).
+    """
+    locs = ds.coords['location'].values
+    loc_index = {}   # cid -> loc_str
+    for loc in locs:
+        loc_str = str(loc)
+        try:
+            cid = int(loc_str.split('_')[-1])
+            loc_index[cid] = loc_str
+        except ValueError:
+            continue
+
+    domain_cids = sorted(int(c) for c in np.unique(cluster_map) if c > 0)
+    scour_map   = {}
+    n_ok = n_fail = n_missing = 0
+
+    for cid in domain_cids:
+        loc_str = loc_index.get(cid)
+        if loc_str is None:
+            n_missing += 1
+            continue
+
+        slab_thick_m = None
+        if cid in snap_features.index and 'slab_thickness' in snap_features.columns:
+            st = snap_features.loc[cid, 'slab_thickness']
+            if isinstance(st, pd.Series):
+                st = st.iloc[0]
+            try:
+                val = float(st)
+                if not np.isnan(val) and val > 0:
+                    slab_thick_m = val
+            except (ValueError, TypeError):
+                pass
+
+        try:
+            tidx = int(np.argmin(np.abs(ds.coords['time'].values - snap_ts)))
+            ds_t = ds.sel(location=loc_str).isel(time=tidx)
+            sq   = [d for d in ('slope', 'realization') if d in ds_t.dims]
+            if sq:
+                ds_t = ds_t.squeeze(sq)
+            depth_m, _, _ = _scour_depth_for_cluster(ds_t, slab_thick_m)
+            if depth_m is not None and depth_m > 0:
+                scour_map[cid] = depth_m
+                n_ok += 1
+            else:
+                n_fail += 1
+        except Exception:
+            n_fail += 1
+
+    print(f"  Scour depth map: {n_ok} clusters mapped, "
+          f"{n_fail} failed/zero, {n_missing} missing from Zarr")
+    if scour_map:
+        depths = list(scour_map.values())
+        print(f"  Scour depth: median={np.median(depths):.2f}m  "
+              f"range=[{min(depths):.2f}, {max(depths):.2f}]m")
+    return scour_map
+
+
+# ---------------------------------------------------------------------------
 # Step: scenarios
 # ---------------------------------------------------------------------------
 
@@ -504,6 +642,27 @@ def step_scenarios(cfg, args):
     full_depth = depth_from_snowpack(cluster_map, ds, args.snapshot_date,
                                      snap_features=snap_features)
 
+    # --- Domain-wide entrainable scour depth raster ---
+    # Run the failure-plane-to-hard-layer scan for every cluster in the domain
+    # and write as scour_depth.tif alongside depth.tif in the output directory.
+    # com1DFA can use this as a spatially variable entrainable-depth input
+    # (each cell caps how deep the flowing avalanche can scour old snow).
+    print(f"\nBuilding domain scour depth map ...")
+    snap_ts_sd = np.datetime64(f"{args.snapshot_date}T18:00")
+    scour_depth_map = _build_scour_depth_map(ds, cluster_map, snap_features, snap_ts_sd)
+
+    scour_raster = np.full(cluster_map.shape, np.nan, dtype=np.float32)
+    for cid, depth in scour_depth_map.items():
+        scour_raster[cluster_map == cid] = float(depth)
+
+    scour_tif_path = out_dir / "scour_depth.tif"
+    _sd_profile = raster_profile.copy()
+    _sd_profile.update(dtype='float32', count=1, nodata=float('nan'),
+                       compress='lzw', predictor=2)
+    with rasterio.open(str(scour_tif_path), 'w', **_sd_profile) as _dst:
+        _dst.write(scour_raster[np.newaxis, ...])
+    print(f"  Written: {scour_tif_path}")
+
     # --- Scenario density (release zone median from features) ---
     rel_df       = snap_features[snap_features.index.isin(groups.get('release', set()))]
     density_mean = float(rel_df['slab_density'].median()
@@ -546,140 +705,49 @@ def step_scenarios(cfg, args):
                 A_ca = min(float(val), A_CA_MAX)
         a_ca_list.append(A_ca)
 
-        # Extract hand hardness at trigger cluster from SNOWPACK profile
+        # Extract scour depth at trigger cluster from SNOWPACK profile
         hh_depth_m, hh_depth_mid_m, hh_value = None, None, None
-        snap_ts = np.datetime64(f"{args.snapshot_date}T18:00")
-        locs = ds.coords['location'].values
-        # Match location name format: 'cluster_XXXX_cluster_XXXX' or 'cluster_XXXX'
-        t_loc = None
-        for loc in locs:
-            loc_str = str(loc)
-            cid_parsed = int(loc_str.split('_')[-1])
-            if cid_parsed == t_cid:
-                t_loc = loc_str
-                break
-
-        if t_loc is None:
-            print(f"    hand_hardness: trigger cid={t_cid} not found in Zarr locations")
+        t_loc_str = next(
+            (str(loc) for loc in ds.coords['location'].values
+             if int(str(loc).split('_')[-1]) == t_cid), None)
+        if t_loc_str is None:
+            print(f"    scour_depth: trigger cid={t_cid} not found in Zarr")
         else:
-            tidx = int(np.argmin(np.abs(ds.coords['time'].values - snap_ts)))
-            ds_t = ds.sel(location=t_loc).isel(time=tidx)
-            sq = [d for d in ['slope', 'realization'] if d in ds_t.dims]
-            if sq:
-                ds_t = ds_t.squeeze(sq)
-            if 'hand_hardness' not in ds_t:
-                print(f"    scour_depth: hand_hardness not in Zarr dataset")
-            else:
-                try:
-                    hh = ds_t['hand_hardness'].values.ravel()
+            try:
+                tidx  = int(np.argmin(np.abs(ds.coords['time'].values - snap_ts_sd)))
+                ds_t  = ds.sel(location=t_loc_str).isel(time=tidx)
+                sq    = [d for d in ('slope', 'realization') if d in ds_t.dims]
+                if sq:
+                    ds_t = ds_t.squeeze(sq)
+
+                slab_thick_m = None
+                if t_cid in snap_features.index and \
+                   'slab_thickness' in snap_features.columns:
+                    st = snap_features.loc[t_cid, 'slab_thickness']
+                    if isinstance(st, pd.Series):
+                        st = st.iloc[0]
+                    try:
+                        slab_thick_m = float(st)
+                    except (ValueError, TypeError):
+                        pass
+
+                hh_depth_m, hh_depth_mid_m, hh_value = \
+                    _scour_depth_for_cluster(ds_t, slab_thick_m)
+
+                if hh_depth_m is not None:
                     hs_cm = float(np.nanmean(ds_t['HS'].values))
-                    n_layers = len(hh)
+                    print(f"    scour_depth trigger cid={t_cid}: "
+                          f"HS={hs_cm:.1f}cm  "
+                          f"slab={slab_thick_m:.2f}m  "
+                          f"scour={hh_depth_m:.2f}m  "
+                          f"HH={hh_value}")
+                else:
+                    print(f"    scour_depth: extraction failed for "
+                          f"trigger cid={t_cid}")
 
-                    # SNOWPACK hand hardness uses negative values:
-                    #   -1=F, -2=4F, -3=1F, -4=P, -5=K, -6=I
-                    # More negative = harder. "> 1F" means hh < -3.
-                    has_hh = ~np.isnan(hh) & (hh < 0)
-                    n_valid = int(np.sum(has_hh))
-
-                    # Find the layer height variable
-                    z_var = None
-                    for zname in ('height', 'z', 'layer_height'):
-                        if zname in ds_t:
-                            z_var = zname
-                            break
-
-                    if z_var is None:
-                        print(f"    scour_depth: no height variable found")
-                    else:
-                        z = ds_t[z_var].values.ravel()  # cm, per layer
-                        # Ensure z and hh have same length
-                        n_layers = min(len(hh), len(z))
-                        hh = hh[:n_layers]
-                        z = z[:n_layers]
-                        has_hh = has_hh[:n_layers]
-
-                        # Get slab thickness = depth from surface to failure plane
-                        slab_thick_m = None
-                        if t_cid in snap_features.index and \
-                           'slab_thickness' in snap_features.columns:
-                            st = snap_features.loc[t_cid, 'slab_thickness']
-                            if isinstance(st, pd.Series):
-                                st = st.iloc[0]
-                            try:
-                                slab_thick_m = float(st)
-                            except (ValueError, TypeError):
-                                pass
-
-                        if slab_thick_m is None or np.isnan(slab_thick_m):
-                            print(f"    scour_depth: no slab_thickness "
-                                  f"for trigger cid={t_cid}")
-                        else:
-                            # Failure plane height from ground (cm)
-                            fp_height_cm = hs_cm - slab_thick_m * 100.0
-                            fp_mid_cm = hs_cm - slab_thick_m * 50.0  # midpoint
-
-                            # Find the layer index at the failure plane
-                            # Layers are bottom-to-top, z is height from ground
-                            fp_layer_idx = None
-                            for li in range(n_layers - 1, -1, -1):
-                                if z[li] <= fp_height_cm:
-                                    fp_layer_idx = li
-                                    break
-
-                            if fp_layer_idx is None:
-                                fp_layer_idx = 0
-
-                            print(f"    scour_depth: {n_layers} layers, "
-                                  f"{n_valid} with valid HH, "
-                                  f"HS={hs_cm:.1f}cm")
-                            print(f"    Failure plane at "
-                                  f"{fp_height_cm:.1f}cm from ground "
-                                  f"(slab={slab_thick_m:.2f}m, "
-                                  f"layer idx={fp_layer_idx})")
-
-                            # Scan DOWNWARD from failure plane to find
-                            # first hard layer (HH harder than 1F = hh < -3)
-                            # This is the entrainable depth — how deep the
-                            # avalanche can scour before hitting resistance.
-                            hard_layer_idx = None
-                            for li in range(fp_layer_idx, -1, -1):
-                                if has_hh[li] and hh[li] < -3:
-                                    hard_layer_idx = li
-                                    break
-
-                            if hard_layer_idx is not None:
-                                hard_z = float(z[hard_layer_idx])
-                                # Depth from bottom of failure plane
-                                scour_bottom = (fp_height_cm - hard_z) / 100.0
-                                # Depth from midpoint of failure plane
-                                scour_mid = (fp_mid_cm - hard_z) / 100.0
-                                hh_value = float(hh[hard_layer_idx])
-
-                                # Use bottom-of-failure-plane as primary
-                                hh_depth_m = max(scour_bottom, 0.0)
-                                hh_depth_mid_m = max(scour_mid, 0.0)
-
-                                print(f"    → Hard layer (HH={hh_value:.1f}) "
-                                      f"at {hard_z:.1f}cm from ground")
-                                print(f"    → Scour from failure plane bottom: "
-                                      f"{scour_bottom:.2f}m")
-                                print(f"    → Scour from failure plane mid: "
-                                      f"{scour_mid:.2f}m")
-                            else:
-                                # No hard layer below failure plane —
-                                # entrainable all the way to ground
-                                hh_depth_m = fp_height_cm / 100.0
-                                hh_depth_mid_m = fp_mid_cm / 100.0
-                                hh_value = None
-                                print(f"    → No hard layer below failure "
-                                      f"plane — scour to ground: "
-                                      f"{hh_depth_m:.2f}m")
-
-                except Exception as e:
-                    print(f"    scour_depth extraction failed for "
-                          f"cid={t_cid}: {e}")
-                    import traceback
-                    traceback.print_exc()
+            except Exception as e:
+                print(f"    scour_depth extraction failed for "
+                      f"cid={t_cid}: {e}")
 
         for s_idx, size_f in enumerate(args.size_factors):
             for d_idx, d_pct in enumerate(args.depth_pcts):
@@ -874,7 +942,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Post-SNOWPACK analysis pipeline (Pipeline B)")
     parser.add_argument('step',
-        choices=['cluster_update', 'zarr_build', 'analyze', 'scenarios', 'all'],
+        choices=['zarr_build', 'analyze', 'scenarios', 'all'],
         help="Pipeline step to run")
 
     # Common
@@ -961,11 +1029,6 @@ def main():
         args.xi = cfg.xi
     if args.stauchwall_deg is None:
         args.stauchwall_deg = cfg.stauchwall_deg
-
-    if args.step == 'cluster_update':
-        from cluster_update import step_cluster_update
-        step_cluster_update(cfg, args)
-        return
 
     if args.step in ('zarr_build', 'all'):
         step_zarr_build(cfg, args)

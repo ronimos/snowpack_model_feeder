@@ -147,8 +147,12 @@ def scour_sno(sno_data: dict,
         else:
             # Partial removal — trim the top layer
             new_thick = layer_thick - remaining_to_scour
-            top_layer['Layer_Thick'] = f"{new_thick:.6f}"
-            removed_depth += remaining_to_scour
+            if new_thick <= 0.0:
+                layers.pop()
+                removed_depth += layer_thick
+            else:
+                top_layer['Layer_Thick'] = f"{new_thick:.6f}"
+                removed_depth += remaining_to_scour
 
     # Compute new HS
     new_hs = sum(float(l['Layer_Thick']) for l in layers)
